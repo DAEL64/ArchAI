@@ -21,9 +21,12 @@ export default function HomePage() {
           <div className="w-8 h-8 border border-[#4ecdc4]/60 rotate-45 flex items-center justify-center">
             <div className="w-3 h-3 bg-[#4ecdc4]" />
           </div>
-          <span className="font-mono text-sm tracking-[0.2em] uppercase text-white/80">
+          <Link
+            href="/"
+            className="font-mono text-lg tracking-[0.18em] uppercase text-white/70"
+          >
             ArchitectAI
-          </span>
+          </Link>
         </div>
         <div className="flex items-center gap-8 text-sm text-white/40 font-mono">
           <Link
@@ -80,18 +83,18 @@ export default function HomePage() {
         <div className="flex items-center gap-4">
           <Link
             href="/analyze"
-            className="px-8 py-4 bg-[#4ecdc4] text-[#0a0d0f] font-mono text-sm tracking-widest uppercase font-bold hover:bg-black transition-colors"
+            className="group relative px-8 py-4 bg-[#4ecdc4] text-[#0a0d0f] font-mono text-sm tracking-widest uppercase font-bold hover:bg-white transition-colors"
           >
             Upload Blueprint
-          </Link>
-          <Link
-            href="/projects"
-            className="group relative px-8 py-4 bg-[#4ecdc4] text-[#0a0d0f] font-mono text-sm tracking-widest uppercase font-bold hover:bg-black transition-colors"
-          >
-            View Projects
             <span className="ml-3 inline-block group-hover:translate-x-1 transition-transform">
               →
             </span>
+          </Link>
+          <Link
+            href="/projects"
+            className="px-8 py-4 border border-white/10 text-white/50 font-mono text-sm tracking-widest uppercase hover:border-white/30 hover:text-white/80 transition-all"
+          >
+            View Projects
           </Link>
         </div>
       </section>
@@ -103,7 +106,7 @@ export default function HomePage() {
             {
               num: "01",
               title: "Vision Extraction",
-              desc: "Claude reads your blueprint image and extracts every room, dimension, annotation, and material into structured data.",
+              desc: "Our AI reads your blueprint image and extracts every room, dimension, annotation, and material into structured data.",
             },
             {
               num: "02",
@@ -175,7 +178,7 @@ export default function HomePage() {
       {/* Footer */}
       <footer className="relative z-10 border-t border-white/5 px-10 py-6 flex items-center justify-between">
         <span className="font-mono text-xs text-white/15 tracking-widest">
-          ArchitectAI — Powered by Claude
+          ArchitectAI — Powered by META
         </span>
         <span className="font-mono text-xs text-white/15">
           * DWG via conversion

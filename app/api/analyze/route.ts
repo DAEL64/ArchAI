@@ -1,38 +1,80 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from "next/server"; // Import this at the top
 
-const client = new Anthropic();
+export async function POST(req: Request) {
+  try {
+    const { imageBase64 } = await req.json();
 
-const EXTRACTION_PROMPT = `You are an expert architectural analyst. Analyze this blueprint image and extract ALL of the following as valid JSON only — no markdown, no explanation:
+    const response = await fetch("http://127.0.0.1:11434/api/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "llama3.2-vision",
+        stream: false,
+        format: "json",
+        prompt: `
+You are an architectural blueprint expert.
 
+Analyze this blueprint carefully and return ONLY valid JSON.
+
+Extract:
+- rooms
+- square footage estimates
+- number of floors
+- dimensions
+- likely building purpose
+- likely construction materials
+- structural elements
+- key architectural notes
+- confidence
+
+JSON FORMAT:
 {
-  "rooms": [{ "name": string, "estimatedSqft": number, "floor": number }],
-  "dimensions": { "totalSqft": number, "width": number, "depth": number, "floors": number },
-  "materials": [string],
-  "structuralElements": [string],
-  "annotations": [string],
-  "buildingType": string,
-  "confidence": "high" | "medium" | "low"
+  "rooms":[
+    {
+      "name":"",
+      "estimatedSqft":0,
+      "floor":1
+    }
+  ],
+  "dimensions":{
+    "totalSqft":0,
+    "width":0,
+    "depth":0,
+    "floors":1
+  },
+  "materials":[],
+  "structuralElements":[],
+  "annotations":[],
+  "buildingType":"",
+  "mainPurpose":"",
+  "architecturalInsights":[],
+  "confidence":"high"
 }
+        `,
+        images: [imageBase64],
+      }),
+    });
 
-If a field cannot be determined, use null. Always return valid JSON.`;
+    const raw = await response.json();
 
-export async function POST(req: NextRequest) {
-  const { imageBase64, mediaType } = await req.json();
+    if (!raw.response) {
+      throw new Error(raw.error || "Ollama failed to generate a response");
+    }
 
-  const message = await client.messages.create({
-    model: 'claude-opus-4-5',
-    max_tokens: 2000,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'image', source: { type: 'base64', media_type: mediaType, data: imageBase64 } },
-        { type: 'text', text: EXTRACTION_PROMPT }
-      ]
-    }]
-  });
+    // Excellent string sanitization additions here 🎯
+    const cleanedString = raw.response
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
 
-  const text = message.content[0].type === 'text' ? message.content[0].text : '';
-  const data = JSON.parse(text.replace(/```json|```/g, '').trim());
-  return NextResponse.json(data);
+    const parsed = JSON.parse(cleanedString);
+    return NextResponse.json(parsed); // Using NextResponse for clean formatting consistency
+  } catch (err) {
+    console.error("ANALYZE ERROR:", err);
+
+    // FIX: Corrected options argument positioning for server response status codes
+    return NextResponse.json({ error: "analysis failed" }, { status: 500 });
+  }
 }

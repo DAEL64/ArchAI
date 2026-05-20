@@ -82,7 +82,7 @@ export default function DashboardLayout({
           <div className="flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-[#4ecdc4] animate-pulse" />
             <span className="font-mono text-[10px] text-white/25 tracking-wider">
-              Claude claude-sonnet-4-5
+              ArchitectAI
             </span>
           </div>
         </div>

@@ -1,28 +1,45 @@
-import Anthropic from '@anthropic-ai/sdk';
-
-const client = new Anthropic();
+// app/api/chat/route.ts
+import { NextResponse } from "next/server";
 
 export async function POST(req: Request) {
-  const { messages, blueprintContext } = await req.json();
+  try {
+    const { messages, blueprintContext } = await req.json();
 
-  const stream = await client.messages.stream({
-    model: 'claude-opus-4-5',
-    max_tokens: 1024,
-    system: `You are ArchitectAI, an expert architectural assistant. The user has uploaded a blueprint. Here is the extracted data:\n\n${JSON.stringify(blueprintContext, null, 2)}\n\nAnswer questions about this specific building accurately and helpfully.`,
-    messages
-  });
+    // Compile contextual ground rule string injects
+    const systemPrompt = `You are an AI architectural co-pilot inside ArchitectAI.
+You are helping a client analyze their blueprint. Here is the validated data payload compiled from the vision extraction engine:
 
-  const encoder = new TextEncoder();
-  const readable = new ReadableStream({
-    async start(controller) {
-      for await (const chunk of stream) {
-        if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-          controller.enqueue(encoder.encode(chunk.delta.text));
-        }
-      }
-      controller.close();
-    }
-  });
+${JSON.stringify(blueprintContext || {}, null, 2)}
 
-  return new Response(readable, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+Answer queries accurately relative to these specific building constraints, dimensions, material provisions, and room listings. Keep explanations clean and concise.`;
+
+    // Package payload structure to push into Ollama local chat pipeline
+    const ollamaMessages = [
+      { role: "system", content: systemPrompt },
+      ...messages.map((m: any) => ({ role: m.role, content: m.content })),
+    ];
+
+    const response = await fetch("http://127.0.0.1:11434/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "llama3.2-vision", // Or your standard text model like llama3.2 / mistral
+        messages: ollamaMessages,
+        stream: false,
+      }),
+    });
+
+    const data = await response.json();
+    const replyText =
+      data.message?.content ||
+      "System failed to compute text context linkage response.";
+
+    return new NextResponse(replyText, { status: 200 });
+  } catch (error) {
+    console.error("CHAT ENDPOINT ERROR:", error);
+    return NextResponse.json(
+      { error: "Failed to generate model inference stream" },
+      { status: 500 },
+    );
+  }
 }

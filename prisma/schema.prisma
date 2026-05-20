@@ -1,0 +1,32 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL") // Add your MongoDB URI to .env
+}
+
+model Project {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  name      String    @default("New Blueprint")
+  imageUrl  String?
+  data      Json?     // Stores your analyzed blueprint data
+  messages  Message[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Message {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  role      String   // "user" or "assistant"
+  content   String
+  projectId String   @db.ObjectId
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}

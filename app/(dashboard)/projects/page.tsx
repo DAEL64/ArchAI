@@ -1,29 +1,35 @@
-'use client'
+"use client";
 
-import { useState, useEffect } from 'react'
-import Link from 'next/link'
-import type { BlueprintData } from '@/types/blueprint'
+import { useState, useEffect } from "react";
+import Link from "next/link";
+import type { BlueprintData } from "@/types/blueprint";
 
 interface SavedProject {
-  id: string
-  name: string
-  createdAt: string
-  thumbnailUrl: string | null
-  data: BlueprintData
+  id: string;
+  name: string;
+  createdAt: string;
+  thumbnailUrl: string | null;
+  data: BlueprintData;
 }
 
-function ProjectCard({ project, onDelete }: { project: SavedProject; onDelete: (id: string) => void }) {
-  const roomCount = project.data.rooms?.length ?? 0
-  const buildingType = project.data.buildingType ?? 'Unknown'
-  const sqft = project.data.dimensions?.totalSqft
+function ProjectCard({
+  project,
+  onDelete,
+}: {
+  project: SavedProject;
+  onDelete: (id: string) => void;
+}) {
+  const roomCount = project.data.rooms?.length ?? 0;
+  const buildingType = project.data.buildingType ?? "Unknown";
+  const sqft = project.data.dimensions?.totalSqft;
 
-  const confidence = project.data.confidence
+  const confidence = project.data.confidence;
   const confidenceColor =
-    confidence === 'high'
-      ? 'text-[#4ecdc4]/70 border-[#4ecdc4]/20'
-      : confidence === 'medium'
-      ? 'text-yellow-400/70 border-yellow-400/20'
-      : 'text-red-400/70 border-red-400/20'
+    confidence === "high"
+      ? "text-[#4ecdc4]/70 border-[#4ecdc4]/20"
+      : confidence === "medium"
+        ? "text-yellow-400/70 border-yellow-400/20"
+        : "text-red-400/70 border-red-400/20";
 
   return (
     <div className="group border border-white/8 hover:border-white/15 transition-all bg-[#0c0f12] flex flex-col">
@@ -43,27 +49,35 @@ function ProjectCard({ project, onDelete }: { project: SavedProject; onDelete: (
                 linear-gradient(rgba(78,205,196,1) 1px, transparent 1px),
                 linear-gradient(90deg, rgba(78,205,196,1) 1px, transparent 1px)
               `,
-              backgroundSize: '14px 14px',
+              backgroundSize: "14px 14px",
             }}
           />
         )}
         <div className="absolute top-2 right-2">
-          <span className={`font-mono text-[9px] tracking-widest uppercase px-2 py-0.5 border ${confidenceColor}`}>
-            {confidence ?? 'unknown'}
+          <span
+            className={`font-mono text-[9px] tracking-widest uppercase px-2 py-0.5 border ${confidenceColor}`}
+          >
+            {confidence ?? "unknown"}
           </span>
         </div>
       </div>
 
       {/* Info */}
       <div className="px-4 py-3 flex-1 flex flex-col gap-1.5">
-        <p className="font-mono text-xs text-white/75 truncate">{project.name}</p>
-        <p className="font-mono text-[10px] text-white/30 truncate">{buildingType}</p>
+        <p className="font-mono text-xs text-white/75 truncate">
+          {project.name}
+        </p>
+        <p className="font-mono text-[10px] text-white/30 truncate">
+          {buildingType}
+        </p>
         <div className="flex items-center gap-3 mt-1">
           <span className="font-mono text-[10px] text-white/25">
-            {roomCount} room{roomCount !== 1 ? 's' : ''}
+            {roomCount} room{roomCount !== 1 ? "s" : ""}
           </span>
           {sqft && (
-            <span className="font-mono text-[10px] text-white/25">{sqft} ft²</span>
+            <span className="font-mono text-[10px] text-white/25">
+              {sqft} ft²
+            </span>
           )}
         </div>
       </div>
@@ -71,10 +85,10 @@ function ProjectCard({ project, onDelete }: { project: SavedProject; onDelete: (
       {/* Actions */}
       <div className="px-4 py-3 border-t border-white/5 flex items-center justify-between">
         <span className="font-mono text-[10px] text-white/20">
-          {new Date(project.createdAt).toLocaleDateString('en-US', {
-            month: 'short',
-            day: 'numeric',
-            year: 'numeric',
+          {new Date(project.createdAt).toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
           })}
         </span>
         <div className="flex items-center gap-2">
@@ -93,7 +107,7 @@ function ProjectCard({ project, onDelete }: { project: SavedProject; onDelete: (
         </div>
       </div>
     </div>
-  )
+  );
 }
 
 function EmptyProjects() {
@@ -106,11 +120,13 @@ function EmptyProjects() {
             linear-gradient(rgba(78,205,196,1) 1px, transparent 1px),
             linear-gradient(90deg, rgba(78,205,196,1) 1px, transparent 1px)
           `,
-          backgroundSize: '12px 12px',
+          backgroundSize: "12px 12px",
         }}
       />
       <div className="space-y-2 -mt-16">
-        <p className="font-mono text-xs text-white/30 tracking-widest">No projects yet</p>
+        <p className="font-mono text-xs text-white/30 tracking-widest">
+          No projects yet
+        </p>
         <p className="font-mono text-[11px] text-white/15">
           Analyzed blueprints will appear here
         </p>
@@ -122,39 +138,69 @@ function EmptyProjects() {
         Upload Blueprint →
       </Link>
     </div>
-  )
+  );
 }
 
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<SavedProject[]>([])
-  const [filter, setFilter] = useState<string>('all')
-  const [search, setSearch] = useState('')
-  const [loaded, setLoaded] = useState(false)
+  const [projects, setProjects] = useState<SavedProject[]>([]);
+  const [filter, setFilter] = useState<string>("all");
+  const [search, setSearch] = useState("");
+  const [loaded, setLoaded] = useState(false);
 
-  // Load from localStorage (swap for DB/Blob fetch when backend is ready)
+  // 1. Fetch live metadata directly from MongoDB using the new endpoint
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('architectai_projects')
-      if (raw) setProjects(JSON.parse(raw))
-    } catch {
-      // ignore
+    async function loadProjects() {
+      try {
+        const res = await fetch("/api/projects");
+        if (res.ok) {
+          const data = await res.json();
+          // Prisma returns records matching schema structure exactly
+          const formatted = data.map((p: any) => ({
+            id: p.id,
+            name: p.name,
+            createdAt: p.createdAt,
+            thumbnailUrl: p.imageUrl, // Maps schema imageUrl to your UI card property
+            data: p.data,
+          }));
+          setProjects(formatted);
+        }
+      } catch (err) {
+        console.error("Failed to fetch database index:", err);
+      } finally {
+        setLoaded(true);
+      }
     }
-    setLoaded(true)
-  }, [])
+    loadProjects();
+  }, []);
 
-  const handleDelete = (id: string) => {
-    const updated = projects.filter((p) => p.id !== id)
-    setProjects(updated)
-    localStorage.setItem('architectai_projects', JSON.stringify(updated))
-  }
+  // 2. Perform database record deletion alongside local state update
+  const handleDelete = async (id: string) => {
+    try {
+      const res = await fetch(`/api/projects?id=${id}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setProjects((prev) => prev.filter((p) => p.id !== id));
+      }
+    } catch (err) {
+      console.error("Failed to delete record from cloud instance:", err);
+    }
+  };
 
-  const buildingTypes = ['all', ...Array.from(new Set(projects.map((p) => p.data.buildingType ?? 'Unknown')))]
+  const buildingTypes = [
+    "all",
+    ...Array.from(
+      new Set(projects.map((p) => p.data?.buildingType ?? "Unknown")),
+    ),
+  ];
 
   const filtered = projects.filter((p) => {
-    const matchType = filter === 'all' || (p.data.buildingType ?? 'Unknown') === filter
-    const matchSearch = !search || p.name.toLowerCase().includes(search.toLowerCase())
-    return matchType && matchSearch
-  })
+    const matchType =
+      filter === "all" || (p.data?.buildingType ?? "Unknown") === filter;
+    const matchSearch =
+      !search || p.name.toLowerCase().includes(search.toLowerCase());
+    return matchType && matchSearch;
+  });
 
   return (
     <div className="h-full flex flex-col">
@@ -175,8 +221,8 @@ export default function ProjectsPage() {
                   onClick={() => setFilter(type)}
                   className={`px-3 py-1.5 font-mono text-[10px] tracking-widest uppercase transition-all ${
                     filter === type
-                      ? 'bg-[#4ecdc4]/10 text-[#4ecdc4]/80 border border-[#4ecdc4]/20'
-                      : 'text-white/25 border border-transparent hover:text-white/45'
+                      ? "bg-[#4ecdc4]/10 text-[#4ecdc4]/80 border border-[#4ecdc4]/20"
+                      : "text-white/25 border border-transparent hover:text-white/45"
                   }`}
                 >
                   {type}
@@ -188,7 +234,7 @@ export default function ProjectsPage() {
 
         <div className="flex items-center gap-3">
           <span className="font-mono text-[11px] text-white/20">
-            {filtered.length} project{filtered.length !== 1 ? 's' : ''}
+            {filtered.length} project{filtered.length !== 1 ? "s" : ""}
           </span>
           <Link
             href="/analyze"
@@ -204,7 +250,10 @@ export default function ProjectsPage() {
         {!loaded ? (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="border border-white/5 h-56 animate-pulse bg-white/[0.02]" />
+              <div
+                key={i}
+                className="border border-white/5 h-56 animate-pulse bg-white/[0.02]"
+              />
             ))}
           </div>
         ) : filtered.length === 0 ? (
@@ -212,11 +261,15 @@ export default function ProjectsPage() {
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             {filtered.map((project) => (
-              <ProjectCard key={project.id} project={project} onDelete={handleDelete} />
+              <ProjectCard
+                key={project.id}
+                project={project}
+                onDelete={handleDelete}
+              />
             ))}
           </div>
         )}
       </div>
     </div>
-  )
+  );
 }
