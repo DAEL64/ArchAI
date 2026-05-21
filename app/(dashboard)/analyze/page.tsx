@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import type { BlueprintData } from "@/types/blueprint";
 
 // ─── Types ───────────────────────────────────────────────
@@ -22,10 +23,10 @@ interface Project {
   imageUrl: string | null; // Keeps track of layout image if safe to store
 }
 
-// ─── MAIN PAGE ───────────────────────────────────────────
+// ─── INTERNAL COMPONENT WITH HOOKS ───────────────────────
 
-export default function AnalyzePage() {
-  // Active transient file states (Never persisted directly to avoid QuotaExceeded crashes)
+function AnalyzeContent() {
+  // Active transient file states
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageB64, setImageB64] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>("Blueprint");
@@ -42,6 +43,10 @@ export default function AnalyzePage() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Next.js Router Hook for URL tracking
+  const searchParams = useSearchParams();
+  const idParam = searchParams.get("id");
 
   // ─── UTILS: LOCAL STORAGE OPERATIONS ─────────────────────
 
@@ -86,8 +91,6 @@ export default function AnalyzePage() {
         createdAt: new Date().toISOString(),
         data: initialData,
         messages: initialMessages,
-        // FORCE NULL: Do not attempt to save Base64 strings to LocalStorage.
-        // It will crash the 5MB limit and break the save system.
         imageUrl: null,
       };
 
@@ -104,33 +107,34 @@ export default function AnalyzePage() {
       setCurrentProjectId(newId);
       return newId;
     },
-    [fileName], // Removed imageUrl dependency
+    [fileName],
   );
 
   // ─── ROUTING & STATE HYDRATION ───────────────────────────
 
-  // On mount, check if loading an existing project from query params (?id=...)
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const idParam = params.get("project");
-
     if (idParam) {
       const target = getSavedProjects().find((p) => p.id === idParam);
       if (target) {
         setCurrentProjectId(target.id);
         setData(target.data);
-        setMessages(target.messages);
+        setMessages(target.messages || []);
         setImageUrl(target.imageUrl);
+        setFileName(target.name || "Blueprint");
         setState("done");
         return;
       }
     }
 
-    // Always default to clean slate if no explicit ID or if state is broken
     setState("idle");
-  }, []);
+    setImageUrl(null);
+    setImageB64(null);
+    setData(null);
+    setMessages([]);
+    setCurrentProjectId(null);
+    setFileName("Blueprint");
+  }, [idParam]);
 
-  // Auto-scroll chat window
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping]);
@@ -138,7 +142,6 @@ export default function AnalyzePage() {
   // ─── HANDLE FILE ───────────────────────────────────────
 
   const handleFile = useCallback((file: File) => {
-    // Clear state before updating to guarantee fresh drop zones
     setImageUrl(null);
     setImageB64(null);
     setData(null);
@@ -161,10 +164,14 @@ export default function AnalyzePage() {
   const handleAnalyze = useCallback(async () => {
     if (!imageB64 || state === "analyzing") return;
 
+    let activeProjectId = currentProjectId;
+    if (!activeProjectId) {
+      activeProjectId = createNewProjectSession(null, []);
+    }
+
     setState("analyzing");
     const controller = new AbortController();
 
-    // FIX: Pass a specific reason into the abort method to prevent the generic error
     const timeout = setTimeout(() => {
       controller.abort(new Error("Analysis timed out after 90 seconds"));
     }, 300000);
@@ -186,22 +193,20 @@ export default function AnalyzePage() {
       setState("done");
       setActiveTab("rooms");
 
-      // Auto-initialize project save snapshot on analysis completion
       if (!currentProjectId) {
         createNewProjectSession(parsedData, messages);
       } else {
         saveProjectUpdate(currentProjectId, { data: parsedData });
       }
+
+      window.dispatchEvent(new Event("storage"));
     } catch (err: any) {
       clearTimeout(timeout);
 
-      // FIX: Gracefully catch the AbortError so it doesn't bleed into the console as a crash
       if (err.name === "AbortError" || err.message?.includes("timed out")) {
-        console.warn(
-          "⚠️ Analysis Pipeline: Request safely aborted because it took longer than 90s.",
-        );
+        console.warn("⚠️ Analysis Pipeline: Request aborted.");
         setState("error");
-        return; // Exit early so we don't log it as a fatal exception
+        return;
       }
 
       console.error("Analysis Pipeline Exception:", err);
@@ -228,7 +233,6 @@ export default function AnalyzePage() {
     setInput("");
     setIsTyping(true);
 
-    // Initialize state context tracking
     let activeId = currentProjectId;
     if (!activeId) {
       activeId = createNewProjectSession(data, payloadMessages);
@@ -236,13 +240,15 @@ export default function AnalyzePage() {
       saveProjectUpdate(activeId, { messages: payloadMessages });
     }
 
+    window.dispatchEvent(new Event("storage"));
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: payloadMessages,
-          blueprintContext: data, // Injects parsed telemetry data directly down the pipeline
+          blueprintContext: data,
         }),
       });
 
@@ -256,6 +262,8 @@ export default function AnalyzePage() {
 
       setMessages(finalMessages);
       saveProjectUpdate(activeId, { messages: finalMessages });
+
+      window.dispatchEvent(new Event("storage"));
     } catch {
       const errorMessages: Message[] = [
         ...payloadMessages,
@@ -267,6 +275,8 @@ export default function AnalyzePage() {
       ];
       setMessages(errorMessages);
       saveProjectUpdate(activeId, { messages: errorMessages });
+
+      window.dispatchEvent(new Event("storage"));
     } finally {
       setIsTyping(false);
     }
@@ -284,8 +294,8 @@ export default function AnalyzePage() {
 
   return (
     <div className="h-screen flex flex-col bg-zinc-950 text-zinc-100 antialiased font-sans">
-      {/* Top Header Controls */}
-      <header className="h-14 border-b border-zinc-800 px-6 flex items-center justify-between bg-zinc-900/50 back-drop-blur">
+      {/* Top Header */}
+      <header className="h-14 border-b border-zinc-800 px-6 flex items-center justify-between bg-zinc-900/50 back-drop-blur flex-shrink-0">
         <div className="flex items-center gap-3">
           <span className="font-mono text-xs tracking-wider uppercase text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded bg-emerald-500/5">
             System Operational
@@ -300,8 +310,8 @@ export default function AnalyzePage() {
       </header>
 
       <div className="grid grid-cols-[320px_1fr_400px] flex-1 overflow-hidden">
-        {/* LEFT COLUMN: Controls & Input File Handler */}
-        <div className="border-r border-zinc-800 p-4 bg-zinc-900/20 flex flex-col gap-4 overflow-y-auto">
+        {/* LEFT COLUMN: Input File Handler */}
+        <div className="border-r border-zinc-800 p-4 bg-zinc-900/20 flex flex-col gap-4 overflow-y-auto hidden-scrollbar">
           <h3 className="text-xs font-semibold tracking-wider uppercase text-zinc-400">
             Blueprint Source
           </h3>
@@ -369,7 +379,7 @@ export default function AnalyzePage() {
         </div>
 
         {/* CENTER COLUMN: Parsed Context Evaluation Panels */}
-        <div className="p-6 overflow-y-auto flex flex-col bg-zinc-900/10">
+        <div className="p-6 overflow-y-auto flex flex-col bg-zinc-900/10 hidden-scrollbar">
           <div className="flex gap-2 border-b border-zinc-800 pb-3 mb-6">
             {(["rooms", "dimensions", "materials"] as ActiveTab[]).map(
               (tab) => (
@@ -378,8 +388,8 @@ export default function AnalyzePage() {
                   onClick={() => setActiveTab(tab)}
                   className={`text-xs uppercase font-mono tracking-wider px-3 py-1.5 rounded-md transition ${
                     activeTab === tab
-                      ? "bg-zinc-800 text-zinc-100"
-                      : "text-zinc-400 hover:text-zinc-200"
+                      ? "bg-zinc-800 text-zinc-100 border border-zinc-700"
+                      : "text-zinc-400 hover:text-zinc-200 border border-transparent"
                   }`}
                 >
                   {tab}
@@ -389,36 +399,178 @@ export default function AnalyzePage() {
           </div>
 
           {data ? (
-            <div className="space-y-6 max-w-2xl">
-              <div>
-                <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono mb-2">
-                  Building Context Mapping
-                </h2>
-                <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800">
-                  <p className="text-sm leading-relaxed text-zinc-300">
-                    {data.mainPurpose || "Classification omitted."}
-                  </p>
+            <div className="space-y-6 max-w-3xl">
+              {/* Always keep the top-level insights visible as a header */}
+              <div className="p-4 rounded-xl bg-zinc-900/80 border border-zinc-800/80 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono">
+                    Project Classification
+                  </h2>
+                  <span className="text-[10px] uppercase font-mono text-emerald-400/70 border border-emerald-400/20 px-2 py-0.5 rounded">
+                    Confidence: {data.confidence || "N/A"}
+                  </span>
+                </div>
+                <p className="text-sm leading-relaxed text-zinc-300">
+                  {data.mainPurpose || "Classification omitted."}
+                </p>
+                <div className="text-xs text-zinc-500 font-mono mt-1">
+                  Type:{" "}
+                  <span className="text-zinc-400">
+                    {data.buildingType || "Unknown"}
+                  </span>
                 </div>
               </div>
 
-              <div>
-                <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono mb-2">
-                  Engine Architecture Insights
-                </h2>
-                <ul className="space-y-2">
-                  {data.architecturalInsights?.map((insight, idx) => (
-                    <li
-                      key={idx}
-                      className="text-sm p-3.5 bg-zinc-900/60 border border-zinc-800/80 rounded-xl text-zinc-300 leading-relaxed flex gap-3"
-                    >
-                      <span className="text-emerald-400 font-mono">
-                        [{idx + 1}]
+              {/* DYNAMIC TAB CONTENT SWITCHER */}
+
+              {/* 1. ROOMS TAB */}
+              {activeTab === "rooms" && (
+                <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                  <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono">
+                    Detected Spatial Zones
+                  </h2>
+                  {data.rooms && data.rooms.length > 0 ? (
+                    <div className="grid grid-cols-2 gap-3">
+                      {data.rooms.map((room, idx) => (
+                        <div
+                          key={idx}
+                          className="p-3.5 rounded-lg bg-zinc-900/40 border border-zinc-800 flex flex-col gap-1.5"
+                        >
+                          <span className="text-sm font-medium text-zinc-200 truncate">
+                            {room.name || "Unidentified Space"}
+                          </span>
+                          <div className="flex justify-between items-center text-[10px] font-mono text-zinc-500 uppercase tracking-wider">
+                            <span>Floor {room.floor || 1}</span>
+                            <span>
+                              {room.estimatedSqft
+                                ? `${room.estimatedSqft} sqft`
+                                : "Size Est. Pending"}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm font-mono text-zinc-500 italic">
+                      No isolated rooms detected in telemetry.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* 2. DIMENSIONS TAB */}
+              {activeTab === "dimensions" && (
+                <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                  <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono">
+                    Structural Mathematics
+                  </h2>
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div className="p-4 rounded-lg bg-zinc-900/40 border border-zinc-800 flex flex-col gap-1">
+                      <span className="text-[10px] font-mono text-zinc-500 uppercase">
+                        Total Area
                       </span>
-                      <span>{insight}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+                      <span className="text-lg text-zinc-200">
+                        {data.dimensions?.totalSqft || "N/A"}{" "}
+                        <span className="text-xs text-zinc-500">ft²</span>
+                      </span>
+                    </div>
+                    <div className="p-4 rounded-lg bg-zinc-900/40 border border-zinc-800 flex flex-col gap-1">
+                      <span className="text-[10px] font-mono text-zinc-500 uppercase">
+                        Width
+                      </span>
+                      <span className="text-lg text-zinc-200">
+                        {data.dimensions?.width || "N/A"}{" "}
+                        <span className="text-xs text-zinc-500">ft</span>
+                      </span>
+                    </div>
+                    <div className="p-4 rounded-lg bg-zinc-900/40 border border-zinc-800 flex flex-col gap-1">
+                      <span className="text-[10px] font-mono text-zinc-500 uppercase">
+                        Depth
+                      </span>
+                      <span className="text-lg text-zinc-200">
+                        {data.dimensions?.depth || "N/A"}{" "}
+                        <span className="text-xs text-zinc-500">ft</span>
+                      </span>
+                    </div>
+                    <div className="p-4 rounded-lg bg-zinc-900/40 border border-zinc-800 flex flex-col gap-1">
+                      <span className="text-[10px] font-mono text-zinc-500 uppercase">
+                        Floors
+                      </span>
+                      <span className="text-lg text-zinc-200">
+                        {data.dimensions?.floors || "1"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono mt-6">
+                    Key Architectural Notes
+                  </h2>
+                  <ul className="space-y-2">
+                    {data.architecturalInsights?.map((insight, idx) => (
+                      <li
+                        key={idx}
+                        className="text-sm p-3 bg-zinc-900/30 border border-zinc-800/50 rounded-lg text-zinc-300 flex gap-3"
+                      >
+                        <span className="text-emerald-400/50 font-mono">
+                          [{idx + 1}]
+                        </span>
+                        <span>{insight}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* 3. MATERIALS TAB */}
+              {activeTab === "materials" && (
+                <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                  <div>
+                    <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono mb-3">
+                      Identified Construction Materials
+                    </h2>
+                    {data.materials && data.materials.length > 0 ? (
+                      <div className="flex flex-wrap gap-2">
+                        {data.materials.map((mat, idx) => (
+                          <span
+                            key={idx}
+                            className="px-3 py-1.5 rounded bg-zinc-800 text-xs text-zinc-300 border border-zinc-700"
+                          >
+                            {mat}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm font-mono text-zinc-500 italic">
+                        No materials specified in blueprint text.
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono mb-3">
+                      Core Structural Elements
+                    </h2>
+                    {data.structuralElements &&
+                    data.structuralElements.length > 0 ? (
+                      <ul className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {data.structuralElements.map((elem, idx) => (
+                          <li
+                            key={idx}
+                            className="text-sm p-2.5 bg-zinc-900/40 border border-zinc-800 rounded-lg text-zinc-400 flex items-center gap-2"
+                          >
+                            <div className="w-1.5 h-1.5 rounded-full bg-zinc-600" />
+                            {elem}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-sm font-mono text-zinc-500 italic">
+                        Structural elements obscured or unclear.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-center opacity-40">
@@ -432,21 +584,20 @@ export default function AnalyzePage() {
           )}
         </div>
 
-        {/* RIGHT COLUMN: Dedicated Context-Aware Inference Agent */}
-        <div className="border-l border-zinc-800 flex flex-col bg-zinc-900/30">
-          <div className="p-3 border-b border-zinc-800 bg-zinc-900/40">
+        {/* RIGHT COLUMN: Chat Bot */}
+        <div className="border-l border-zinc-800 flex flex-col bg-zinc-900/30 overflow-hidden">
+          <div className="p-3 border-b border-zinc-800 bg-zinc-900/40 flex-shrink-0">
             <h3 className="text-xs font-semibold tracking-wider uppercase text-zinc-400 font-mono">
               Inference Telemetry Chat
             </h3>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 hidden-scrollbar">
             {messages.length === 0 && (
               <div className="h-full flex items-center justify-center text-center p-6 text-zinc-500">
                 <p className="text-xs leading-relaxed">
                   No execution parameters specified yet. Initialize chat or
-                  analysis to spawn a trackable instance inside your{" "}
-                  <code className="text-zinc-400">projects</code> stack.
+                  analysis to spawn a trackable instance.
                 </p>
               </div>
             )}
@@ -481,7 +632,7 @@ export default function AnalyzePage() {
             <div ref={chatEndRef} />
           </div>
 
-          <div className="p-3 border-t border-zinc-800 bg-zinc-900/40 flex gap-2">
+          <div className="p-3 border-t border-zinc-800 bg-zinc-900/40 flex gap-2 flex-shrink-0">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -499,5 +650,20 @@ export default function AnalyzePage() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ─── MAIN EXPORT WITH SUSPENSE BOUNDARY ──────────────────
+export default function AnalyzePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="h-screen bg-zinc-950 flex items-center justify-center font-mono text-zinc-500 text-sm">
+          Loading Core Architecture...
+        </div>
+      }
+    >
+      <AnalyzeContent />
+    </Suspense>
   );
 }

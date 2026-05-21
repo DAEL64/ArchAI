@@ -19,11 +19,11 @@ function ProjectCard({
   project: SavedProject;
   onDelete: (id: string) => void;
 }) {
-  const roomCount = project.data.rooms?.length ?? 0;
-  const buildingType = project.data.buildingType ?? "Unknown";
-  const sqft = project.data.dimensions?.totalSqft;
+  const roomCount = project.data?.rooms?.length ?? 0;
+  const buildingType = project.data?.buildingType ?? "Unknown";
+  const sqft = project.data?.dimensions?.totalSqft;
 
-  const confidence = project.data.confidence;
+  const confidence = project.data?.confidence;
   const confidenceColor =
     confidence === "high"
       ? "text-[#4ecdc4]/70 border-[#4ecdc4]/20"
@@ -99,7 +99,7 @@ function ProjectCard({
             Delete
           </button>
           <Link
-            href={`/analyze?project=${project.id}`}
+            href={`/analyze?id=${project.id}`}
             className="font-mono text-[10px] text-[#4ecdc4]/50 hover:text-[#4ecdc4]/80 transition-colors tracking-widest uppercase"
           >
             Open →
@@ -147,43 +147,47 @@ export default function ProjectsPage() {
   const [search, setSearch] = useState("");
   const [loaded, setLoaded] = useState(false);
 
-  // 1. Fetch live metadata directly from MongoDB using the new endpoint
+  // Fetch live metadata directly from LocalStorage
   useEffect(() => {
-    async function loadProjects() {
+    function loadProjects() {
       try {
-        const res = await fetch("/api/projects");
-        if (res.ok) {
-          const data = await res.json();
-          // Prisma returns records matching schema structure exactly
-          const formatted = data.map((p: any) => ({
-            id: p.id,
-            name: p.name,
-            createdAt: p.createdAt,
-            thumbnailUrl: p.imageUrl, // Maps schema imageUrl to your UI card property
-            data: p.data,
-          }));
-          setProjects(formatted);
+        const stored = localStorage.getItem("architectai_projects");
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          setProjects(parsed);
+        } else {
+          setProjects([]);
         }
       } catch (err) {
-        console.error("Failed to fetch database index:", err);
+        console.error("Failed to load local index:", err);
       } finally {
         setLoaded(true);
       }
     }
+
     loadProjects();
+
+    // Listen for cross-component storage updates
+    window.addEventListener("storage", loadProjects);
+    return () => window.removeEventListener("storage", loadProjects);
   }, []);
 
-  // 2. Perform database record deletion alongside local state update
-  const handleDelete = async (id: string) => {
+  // Perform local record deletion alongside local state update
+  const handleDelete = (id: string) => {
     try {
-      const res = await fetch(`/api/projects?id=${id}`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        setProjects((prev) => prev.filter((p) => p.id !== id));
+      const stored = localStorage.getItem("architectai_projects");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        const updated = parsed.filter((p: any) => p.id !== id);
+
+        localStorage.setItem("architectai_projects", JSON.stringify(updated));
+        setProjects(updated);
+
+        // Dispatch event so the sidebar updates instantly
+        window.dispatchEvent(new Event("storage"));
       }
     } catch (err) {
-      console.error("Failed to delete record from cloud instance:", err);
+      console.error("Failed to delete record:", err);
     }
   };
 
@@ -246,7 +250,7 @@ export default function ProjectsPage() {
       </div>
 
       {/* Grid */}
-      <div className="flex-1 overflow-y-auto px-6 py-6">
+      <div className="flex-1 overflow-y-auto px-6 py-6 hidden-scrollbar">
         {!loaded ? (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             {Array.from({ length: 6 }).map((_, i) => (

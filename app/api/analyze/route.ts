@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"; // Import this at the top
+import { NextResponse } from "next/server";
 
 export async function POST(req: Request) {
   try {
@@ -63,18 +63,16 @@ JSON FORMAT:
       throw new Error(raw.error || "Ollama failed to generate a response");
     }
 
-    // Excellent string sanitization additions here 🎯
     const cleanedString = raw.response
       .replace(/```json/gi, "")
       .replace(/```/g, "")
       .trim();
 
     const parsed = JSON.parse(cleanedString);
-    return NextResponse.json(parsed); // Using NextResponse for clean formatting consistency
+    return NextResponse.json(parsed);
   } catch (err) {
     console.error("ANALYZE ERROR:", err);
 
-    // FIX: Corrected options argument positioning for server response status codes
     return NextResponse.json({ error: "analysis failed" }, { status: 500 });
   }
 }
