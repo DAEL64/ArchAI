@@ -1,16 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import Link from "next/link";
-import type { BlueprintData } from "@/types/blueprint";
-
-interface SavedProject {
-  id: string;
-  name: string;
-  createdAt: string;
-  thumbnailUrl: string | null;
-  data: BlueprintData;
-}
+import type { SavedProject } from "@/types/blueprint";
 
 function ProjectCard({
   project,
@@ -23,7 +15,8 @@ function ProjectCard({
   const buildingType = project.data?.buildingType ?? "Unknown";
   const sqft = project.data?.dimensions?.totalSqft;
 
-  const confidence = project.data?.confidence;
+  const confidence = project.data?.confidence ?? "unknown";
+
   const confidenceColor =
     confidence === "high"
       ? "text-[#4ecdc4]/70 border-[#4ecdc4]/20"
@@ -33,11 +26,10 @@ function ProjectCard({
 
   return (
     <div className="group border border-white/8 hover:border-white/15 transition-all bg-[#0c0f12] flex flex-col">
-      {/* Thumbnail */}
       <div className="h-36 relative overflow-hidden bg-[#080b0d] flex items-center justify-center border-b border-white/5">
-        {project.thumbnailUrl ? (
+        {project.imageUrl ? (
           <img
-            src={project.thumbnailUrl}
+            src={project.imageUrl}
             alt={project.name}
             className="w-full h-full object-cover opacity-60 group-hover:opacity-80 transition-opacity"
           />
@@ -53,36 +45,42 @@ function ProjectCard({
             }}
           />
         )}
+
         <div className="absolute top-2 right-2">
           <span
             className={`font-mono text-[9px] tracking-widest uppercase px-2 py-0.5 border ${confidenceColor}`}
           >
-            {confidence ?? "unknown"}
+            {confidence}
           </span>
         </div>
       </div>
 
-      {/* Info */}
       <div className="px-4 py-3 flex-1 flex flex-col gap-1.5">
         <p className="font-mono text-xs text-white/75 truncate">
           {project.name}
         </p>
+
         <p className="font-mono text-[10px] text-white/30 truncate">
           {buildingType}
         </p>
+
         <div className="flex items-center gap-3 mt-1">
           <span className="font-mono text-[10px] text-white/25">
             {roomCount} room{roomCount !== 1 ? "s" : ""}
           </span>
-          {sqft && (
+
+          {sqft !== null && sqft !== undefined && (
             <span className="font-mono text-[10px] text-white/25">
               {sqft} ft²
             </span>
           )}
+
+          <span className="font-mono text-[10px] text-white/25">
+            {project.messages?.length || 0} msg
+          </span>
         </div>
       </div>
 
-      {/* Actions */}
       <div className="px-4 py-3 border-t border-white/5 flex items-center justify-between">
         <span className="font-mono text-[10px] text-white/20">
           {new Date(project.createdAt).toLocaleDateString("en-US", {
@@ -91,6 +89,7 @@ function ProjectCard({
             year: "numeric",
           })}
         </span>
+
         <div className="flex items-center gap-2">
           <button
             onClick={() => onDelete(project.id)}
@@ -98,6 +97,7 @@ function ProjectCard({
           >
             Delete
           </button>
+
           <Link
             href={`/analyze?id=${project.id}`}
             className="font-mono text-[10px] text-[#4ecdc4]/50 hover:text-[#4ecdc4]/80 transition-colors tracking-widest uppercase"
@@ -123,6 +123,7 @@ function EmptyProjects() {
           backgroundSize: "12px 12px",
         }}
       />
+
       <div className="space-y-2 -mt-16">
         <p className="font-mono text-xs text-white/30 tracking-widest">
           No projects yet
@@ -131,11 +132,12 @@ function EmptyProjects() {
           Analyzed blueprints will appear here
         </p>
       </div>
+
       <Link
-        href="/analyze"
+        href="/analyze?new=1"
         className="px-6 py-2.5 border border-[#4ecdc4]/30 text-[#4ecdc4]/70 font-mono text-xs tracking-widest uppercase hover:bg-[#4ecdc4]/10 transition-all"
       >
-        Upload Blueprint →
+        New Blueprint →
       </Link>
     </div>
   );
@@ -146,69 +148,93 @@ export default function ProjectsPage() {
   const [filter, setFilter] = useState<string>("all");
   const [search, setSearch] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Fetch live metadata directly from LocalStorage
-  useEffect(() => {
-    function loadProjects() {
-      try {
-        const stored = localStorage.getItem("architectai_projects");
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          setProjects(parsed);
-        } else {
-          setProjects([]);
-        }
-      } catch (err) {
-        console.error("Failed to load local index:", err);
-      } finally {
-        setLoaded(true);
+  const loadProjects = useCallback(async () => {
+    try {
+      setError(null);
+
+      const res = await fetch("/api/projects", {
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to load projects");
       }
+
+      const data = (await res.json()) as SavedProject[];
+      setProjects(data);
+    } catch (err) {
+      console.error("Failed to load projects:", err);
+      setError("Could not load projects. Check your database connection.");
+      setProjects([]);
+    } finally {
+      setLoaded(true);
     }
-
-    loadProjects();
-
-    // Listen for cross-component storage updates
-    window.addEventListener("storage", loadProjects);
-    return () => window.removeEventListener("storage", loadProjects);
   }, []);
 
-  // Perform local record deletion alongside local state update
-  const handleDelete = (id: string) => {
+  useEffect(() => {
+    loadProjects();
+
+    window.addEventListener("architectai-projects-updated", loadProjects);
+
+    return () => {
+      window.removeEventListener("architectai-projects-updated", loadProjects);
+    };
+  }, [loadProjects]);
+
+  async function handleDelete(id: string) {
     try {
-      const stored = localStorage.getItem("architectai_projects");
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        const updated = parsed.filter((p: any) => p.id !== id);
+      const res = await fetch(`/api/projects?id=${id}`, {
+        method: "DELETE",
+      });
 
-        localStorage.setItem("architectai_projects", JSON.stringify(updated));
-        setProjects(updated);
-
-        // Dispatch event so the sidebar updates instantly
-        window.dispatchEvent(new Event("storage"));
+      if (!res.ok) {
+        throw new Error("Failed to delete project");
       }
+
+      setProjects((prev) => prev.filter((project) => project.id !== id));
+      window.dispatchEvent(new Event("architectai-projects-updated"));
     } catch (err) {
-      console.error("Failed to delete record:", err);
+      console.error("Failed to delete project:", err);
+      setError("Could not delete project.");
     }
-  };
+  }
 
-  const buildingTypes = [
-    "all",
-    ...Array.from(
-      new Set(projects.map((p) => p.data?.buildingType ?? "Unknown")),
-    ),
-  ];
+  const buildingTypes = useMemo(() => {
+    return [
+      "all",
+      ...Array.from(
+        new Set(projects.map((p) => p.data?.buildingType ?? "Unknown")),
+      ),
+    ];
+  }, [projects]);
 
-  const filtered = projects.filter((p) => {
-    const matchType =
-      filter === "all" || (p.data?.buildingType ?? "Unknown") === filter;
-    const matchSearch =
-      !search || p.name.toLowerCase().includes(search.toLowerCase());
-    return matchType && matchSearch;
-  });
+  const filtered = useMemo(() => {
+    return projects.filter((p) => {
+      const type = p.data?.buildingType ?? "Unknown";
+
+      const matchType = filter === "all" || type === filter;
+
+      const searchable = [
+        p.name,
+        p.data?.buildingType,
+        p.data?.mainPurpose,
+        ...(p.data?.rooms?.map((room) => room.name) || []),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      const matchSearch =
+        !search || searchable.includes(search.toLowerCase().trim());
+
+      return matchType && matchSearch;
+    });
+  }, [projects, filter, search]);
 
   return (
     <div className="h-full flex flex-col">
-      {/* Toolbar */}
       <div className="flex-shrink-0 px-6 py-4 border-b border-white/5 flex items-center justify-between gap-4">
         <div className="flex items-center gap-2 flex-1">
           <input
@@ -217,13 +243,14 @@ export default function ProjectsPage() {
             placeholder="Search projects…"
             className="bg-white/[0.04] border border-white/8 px-3 py-2 font-mono text-[11px] text-white/60 placeholder:text-white/20 focus:outline-none focus:border-[#4ecdc4]/30 w-56"
           />
+
           {buildingTypes.length > 1 && (
-            <div className="flex gap-1">
+            <div className="flex gap-1 overflow-x-auto hidden-scrollbar">
               {buildingTypes.map((type) => (
                 <button
                   key={type}
                   onClick={() => setFilter(type)}
-                  className={`px-3 py-1.5 font-mono text-[10px] tracking-widest uppercase transition-all ${
+                  className={`px-3 py-1.5 font-mono text-[10px] tracking-widest uppercase transition-all whitespace-nowrap ${
                     filter === type
                       ? "bg-[#4ecdc4]/10 text-[#4ecdc4]/80 border border-[#4ecdc4]/20"
                       : "text-white/25 border border-transparent hover:text-white/45"
@@ -240,8 +267,9 @@ export default function ProjectsPage() {
           <span className="font-mono text-[11px] text-white/20">
             {filtered.length} project{filtered.length !== 1 ? "s" : ""}
           </span>
+
           <Link
-            href="/analyze"
+            href="/analyze?new=1"
             className="px-4 py-2 bg-[#4ecdc4] text-[#0a0d0f] font-mono text-[11px] tracking-widest uppercase font-bold hover:bg-white transition-colors"
           >
             + New
@@ -249,7 +277,12 @@ export default function ProjectsPage() {
         </div>
       </div>
 
-      {/* Grid */}
+      {error && (
+        <div className="px-6 py-3 border-b border-red-500/10 bg-red-950/20 text-red-300/70 font-mono text-xs">
+          {error}
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-6 py-6 hidden-scrollbar">
         {!loaded ? (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">

@@ -42,7 +42,7 @@ export default function HomePage() {
             Projects
           </Link>
           <Link
-            href="/analyze"
+            href="/analyze?new=1"
             className="px-4 py-2 border border-[#4ecdc4]/40 text-[#4ecdc4] hover:bg-[#4ecdc4]/10 transition-all text-xs tracking-widest uppercase"
           >
             Launch
@@ -75,14 +75,15 @@ export default function HomePage() {
         </h1>
 
         <p className="text-white/40 text-lg max-w-xl mb-12 font-light leading-relaxed">
-          Upload any architectural drawing. Extract rooms, dimensions,
-          materials, and structural elements in seconds. Generate a 3D model and
-          ask questions about your design.
+          Upload any architectural drawing to extract rooms, dimensions,
+          materials, and structural elements in seconds — or describe a building
+          and let the AI generate a floor plan. Then ask questions about your
+          design.
         </p>
 
         <div className="flex items-center gap-4">
           <Link
-            href="/analyze"
+            href="/analyze?new=1"
             className="group relative px-8 py-4 bg-[#4ecdc4] text-[#0a0d0f] font-mono text-sm tracking-widest uppercase font-bold hover:bg-white transition-colors"
           >
             Upload Blueprint
@@ -110,8 +111,8 @@ export default function HomePage() {
             },
             {
               num: "02",
-              title: "3D Model Generation",
-              desc: "Automatically build an interactive Three.js 3D model from your floor plan. Orbit, inspect, and explore the structure.",
+              title: "AI Blueprint Generation",
+              desc: "No drawing yet? Describe the building you want and the AI designs a floor plan — rooms, dimensions, and materials included.",
             },
             {
               num: "03",
@@ -141,7 +142,7 @@ export default function HomePage() {
           Supported formats
         </p>
         <div className="flex items-center gap-6 mb-16">
-          {["PNG", "JPG", "PDF", "TIFF", "DWG*"].map((fmt) => (
+          {["PNG", "JPG", "WEBP"].map((fmt) => (
             <span
               key={fmt}
               className="px-3 py-1 border border-white/10 text-white/30 font-mono text-xs"
@@ -152,7 +153,7 @@ export default function HomePage() {
         </div>
 
         <Link
-          href="/analyze"
+          href="/analyze?new=1"
           className="group flex flex-col items-center gap-3 text-white/20 hover:text-white/60 transition-colors"
         >
           <div className="w-16 h-16 border border-white/10 group-hover:border-[#4ecdc4]/40 transition-colors flex items-center justify-center">
@@ -178,10 +179,10 @@ export default function HomePage() {
       {/* Footer */}
       <footer className="relative z-10 border-t border-white/5 px-10 py-6 flex items-center justify-between">
         <span className="font-mono text-xs text-white/15 tracking-widest">
-          ArchitectAI — Powered by META
+          ArchitectAI — Powered by local AI
         </span>
         <span className="font-mono text-xs text-white/15">
-          * DWG via conversion
+          Runs on your machine via Ollama
         </span>
       </footer>
     </main>

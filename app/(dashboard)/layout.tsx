@@ -1,14 +1,52 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import type { SavedProject } from "@/types/blueprint";
+import { AnalysisSessionProvider } from "./analysis-session-provider";
 
-interface Project {
-  id: string;
-  name: string;
-  createdAt: string;
-  messages: any[];
+/**
+ * Renders the recent-projects buttons. Reads ?id from the URL to highlight the
+ * active session, so it MUST live inside a <Suspense> boundary (Next 16 fails
+ * the build if useSearchParams is used without one).
+ */
+function RecentProjectsList({
+  projects,
+  pathname,
+  onOpen,
+}: {
+  projects: SavedProject[];
+  pathname: string;
+  onOpen: (id: string) => void;
+}) {
+  const activeProjectId = useSearchParams().get("id");
+
+  return (
+    <div className="space-y-1">
+      {projects.map((proj) => {
+        const activeSession =
+          pathname === "/analyze" && activeProjectId === proj.id;
+
+        return (
+          <button
+            key={proj.id}
+            onClick={() => onOpen(proj.id)}
+            className={`w-full text-left flex flex-col gap-0.5 px-3 py-2 rounded font-mono transition-all border group ${
+              activeSession
+                ? "bg-white/[0.04] border-white/10 text-white"
+                : "border-transparent text-white/40 hover:text-white/70 hover:bg-white/[0.02]"
+            }`}
+          >
+            <span className="text-xs truncate block w-full">{proj.name}</span>
+            <span className="text-[9px] text-white/20 group-hover:text-white/30 transition-colors">
+              {proj.messages?.length || 0} messages
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 const navItems = [
@@ -61,37 +99,44 @@ export default function DashboardLayout({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [projects, setProjects] = useState<SavedProject[]>([]);
 
-  const loadProjects = () => {
+  const loadProjects = useCallback(async () => {
     try {
-      const stored = localStorage.getItem("architectai_projects");
-      if (stored) {
-        const parsed = JSON.parse(stored) as Project[];
-        setProjects(parsed.slice(0, 5));
-      } else {
-        setProjects([]);
+      const res = await fetch("/api/projects", {
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to load recent projects");
       }
+
+      const data = (await res.json()) as SavedProject[];
+      setProjects(data.slice(0, 5));
     } catch (err) {
-      console.error("Failed to load projects inside layout framework:", err);
+      console.error("Failed to load projects inside layout:", err);
+      setProjects([]);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadProjects();
-    window.addEventListener("storage", loadProjects);
-    return () => window.removeEventListener("storage", loadProjects);
-  }, []);
+
+    window.addEventListener("architectai-projects-updated", loadProjects);
+
+    return () => {
+      window.removeEventListener("architectai-projects-updated", loadProjects);
+    };
+  }, [loadProjects]);
 
   return (
     <div className="flex h-screen bg-[#0a0d0f] text-white overflow-hidden">
-      {/* Sidebar */}
       <aside className="w-[220px] flex-shrink-0 flex flex-col border-r border-white/5 bg-[#0c0f12]">
-        {/* Logo */}
         <div className="flex items-center gap-3 px-5 py-5 border-b border-white/5">
           <div className="w-7 h-7 border border-[#4ecdc4]/60 rotate-45 flex items-center justify-center flex-shrink-0">
             <div className="w-2.5 h-2.5 bg-[#4ecdc4] rotate-[-45deg]" />
           </div>
+
           <Link
             href="/"
             className="font-mono text-xs tracking-[0.18em] uppercase text-white/70"
@@ -100,13 +145,14 @@ export default function DashboardLayout({
           </Link>
         </div>
 
-        {/* Nav */}
         <nav className="px-3 py-4 space-y-1">
           <p className="px-2 mb-3 text-[10px] font-mono tracking-widest uppercase text-white/20">
             Workspace
           </p>
+
           {navItems.map((item) => {
             const active = pathname === item.href;
+
             return (
               <Link
                 key={item.href}
@@ -126,10 +172,9 @@ export default function DashboardLayout({
           })}
         </nav>
 
-        {/* Recent Sessions */}
         <div className="flex-1 px-3 py-2 border-t border-white/[0.02] overflow-y-auto hidden-scrollbar">
           <p className="px-2 mt-2 mb-3 text-[10px] font-mono tracking-widest uppercase text-white/20">
-            Recent Analysis
+            Recent Sessions
           </p>
 
           {projects.length === 0 ? (
@@ -137,33 +182,16 @@ export default function DashboardLayout({
               No recent sessions
             </p>
           ) : (
-            <div className="space-y-1">
-              {projects.map((proj) => {
-                const activeSession = pathname.includes(proj.id);
-                return (
-                  <button
-                    key={proj.id}
-                    onClick={() => router.push(`/analyze?id=${proj.id}`)}
-                    className={`w-full text-left flex flex-col gap-0.5 px-3 py-2 rounded font-mono transition-all border group ${
-                      activeSession
-                        ? "bg-white/[0.04] border-white/10 text-white"
-                        : "border-transparent text-white/40 hover:text-white/70 hover:bg-white/[0.02]"
-                    }`}
-                  >
-                    <span className="text-xs truncate block w-full">
-                      {proj.name}
-                    </span>
-                    <span className="text-[9px] text-white/20 group-hover:text-white/30 transition-colors">
-                      {proj.messages?.length || 0} messages
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+            <Suspense fallback={null}>
+              <RecentProjectsList
+                projects={projects}
+                pathname={pathname}
+                onOpen={(id) => router.push(`/analyze?id=${id}`)}
+              />
+            </Suspense>
           )}
         </div>
 
-        {/* Bottom status */}
         <div className="px-5 py-4 border-t border-white/5 flex-shrink-0">
           <div className="flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-[#4ecdc4] animate-pulse" />
@@ -174,15 +202,14 @@ export default function DashboardLayout({
         </div>
       </aside>
 
-      {/* Main content */}
       <main className="flex-1 overflow-hidden flex flex-col">
-        {/* Top bar */}
         <header className="flex items-center justify-between px-6 py-4 border-b border-white/5 bg-[#0a0d0f] flex-shrink-0">
           <div>
             <h1 className="text-sm font-mono text-white/60 tracking-wider capitalize">
               {pathname.replace("/", "") || "Dashboard"}
             </h1>
           </div>
+
           <div className="flex items-center gap-3">
             <Link
               href="/"
@@ -193,8 +220,9 @@ export default function DashboardLayout({
           </div>
         </header>
 
-        {/* Page content */}
-        <div className="flex-1 overflow-hidden">{children}</div>
+        <AnalysisSessionProvider>
+          <div className="flex-1 overflow-hidden">{children}</div>
+        </AnalysisSessionProvider>
       </main>
     </div>
   );

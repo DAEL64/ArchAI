@@ -9,11 +9,11 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: 'ArchitectAI — Blueprint Analysis',
-  description: 'Upload architectural blueprints. Extract rooms, dimensions, and materials instantly. Generate 3D models and chat with your design.',
-  keywords: ['architecture', 'blueprint analysis', 'AI', 'floor plan', '3D model'],
+  description: 'Upload architectural blueprints to extract rooms, dimensions, and materials instantly — or generate a floor plan from a description and chat with your design.',
+  keywords: ['architecture', 'blueprint analysis', 'AI', 'floor plan', 'blueprint generation'],
   openGraph: {
     title: 'ArchitectAI',
-    description: 'AI-powered blueprint analysis and 3D model generation',
+    description: 'AI-powered blueprint analysis and generation',
     type: 'website',
   },
 }
