@@ -1,3 +1,5 @@
+import type { GenerationParams, PlanCutLine, PlanViewpoint } from "./drawing";
+
 export type ConfidenceLevel = "low" | "medium" | "high";
 
 export interface BlueprintRoom {
@@ -28,6 +30,9 @@ export interface BlueprintData {
   mainPurpose: string;
   architecturalInsights: string[];
   confidence: ConfidenceLevel;
+  /** structured constraint fields used to generate this blueprint (req #9),
+   *  persisted so the form can be prefilled on reload. */
+  generationParams?: GenerationParams | null;
   /**
    * Spatial layout produced by the deterministic layout engine
    * (lib/floorplan.ts) for AI-generated blueprints. Absent for blueprints
@@ -146,6 +151,7 @@ export interface ChatMessage {
 
 export type OverlayTool =
   | "pan"
+  | "select"
   | "pen"
   | "line"
   | "rect"
@@ -212,6 +218,10 @@ export interface BlueprintOverlay {
   width: number;
   height: number;
   elements: OverlayElement[];
+  /** section cut lines marked on the plan (req #3), in plan-feet space */
+  cutLines?: PlanCutLine[];
+  /** perspective viewpoints marked on the plan (req #4), in plan-feet space */
+  viewpoints?: PlanViewpoint[];
 }
 
 export interface SavedProject {

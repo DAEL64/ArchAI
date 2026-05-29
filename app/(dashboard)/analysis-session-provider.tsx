@@ -14,12 +14,19 @@ import type {
   ChatMessage,
   SavedProject,
 } from "@/types/blueprint";
+import type { GenerationParams } from "@/types/drawing";
 import { projectsApi } from "@/lib/api/projects";
 import { aiApi } from "@/lib/api/ai";
 import { ApiError } from "@/lib/api/http";
 
 export type AnalysisState = "idle" | "analyzing" | "generating" | "done" | "error";
-export type ActiveTab = "rooms" | "dimensions" | "materials" | "plan";
+export type ActiveTab =
+  | "rooms"
+  | "dimensions"
+  | "materials"
+  | "plan"
+  | "interior"
+  | "landscape";
 
 interface ProjectPayload {
   name?: string;
@@ -51,7 +58,10 @@ interface AnalysisSessionContextValue {
 
   handleFile: (file: File) => void;
   handleAnalyze: () => Promise<void>;
-  generateBlueprint: (prompt: string) => Promise<BlueprintData | null>;
+  generateBlueprint: (
+    prompt: string,
+    params?: GenerationParams,
+  ) => Promise<BlueprintData | null>;
   sendMessage: () => Promise<void>;
   loadProjectById: (id: string) => Promise<boolean>;
   saveOverlay: (overlay: BlueprintOverlay | null) => Promise<void>;
@@ -345,7 +355,10 @@ export function AnalysisSessionProvider({
   }, [imageB64, fileName, imageUrl, messages, ensureProjectSession, updateProject]);
 
   const generateBlueprint = useCallback(
-    async (prompt: string): Promise<BlueprintData | null> => {
+    async (
+      prompt: string,
+      params?: GenerationParams,
+    ): Promise<BlueprintData | null> => {
       const cleanPrompt = prompt.trim();
       if (!cleanPrompt) return null;
 
@@ -365,7 +378,10 @@ export function AnalysisSessionProvider({
         setFileName(generatedName);
 
         try {
-          const parsedData = await aiApi.generate(cleanPrompt);
+          const parsedData = await aiApi.generate(cleanPrompt, params);
+          // Persist the constraints alongside the blueprint so the form can be
+          // prefilled when the project is reopened.
+          if (params) parsedData.generationParams = params;
 
           result = parsedData;
 

@@ -140,6 +140,39 @@ export type DrawingInput = Partial<Omit<Drawing, "id" | "projectId" | "createdAt
 /** What a client sends to patch a drawing. */
 export type DrawingPatch = Partial<Omit<Drawing, "id" | "projectId" | "createdAt" | "updatedAt">>;
 
+/* ------------------------------------------------------------------ */
+/* Interior design suggestions (textual — possible with the local LLM) */
+/* ------------------------------------------------------------------ */
+
+export interface InteriorRequest {
+  buildingType?: string;
+  room?: string;
+  style?: string;
+  notes?: string;
+}
+
+export interface InteriorSuggestions {
+  summary: string;
+  furniture: string[];
+  lighting: string[];
+  materials: string[];
+  storage: string[];
+  circulation: string[];
+}
+
+export interface LandscapeRequest {
+  context?: string;
+  notes?: string;
+}
+
+export interface LandscapeSuggestions {
+  summary: string;
+  zones: string[];
+  planting: string[];
+  pathways: string[];
+  water: string[];
+}
+
 /** Project metadata, separate from its drawings and chat. */
 export interface ProjectRecord {
   id: string;

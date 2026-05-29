@@ -17,6 +17,20 @@ import type {
   RoomZone,
 } from "@/types/blueprint";
 import { floorPlanFromRooms } from "@/lib/floorplan";
+import {
+  deriveElevation,
+  ELEVATION_SIDES,
+  type ElevationModel,
+  type ElevationSide,
+} from "@/lib/elevation";
+import {
+  cutToPlanLine,
+  deriveSection,
+  planLineToCut,
+  type SectionCut,
+  type SectionModel,
+} from "@/lib/section";
+import type { PlanCutLine, PlanViewpoint } from "@/types/drawing";
 
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
@@ -121,6 +135,9 @@ interface PlanBase {
   width: number;
   height: number;
   content: React.ReactNode;
+  /** feet→base-px transform, set by the floor-plan renderer so callers can map
+   *  pointer positions to plan feet (used for cut/viewpoint marking). */
+  feet?: { ppf: number; margin: number };
 }
 
 function ftLabel(feet: number): string {
@@ -398,7 +415,7 @@ function renderFloorPlan(
     </g>
   );
 
-  return { width: baseW, height: baseH, content };
+  return { width: baseW, height: baseH, content, feet: { ppf, margin: MARGIN } };
 }
 
 /* ------------------------------------------------------------------ */
@@ -569,6 +586,7 @@ const WIDTHS = [2, 4, 8];
 
 const TOOLS: { key: OverlayTool; label: string }[] = [
   { key: "pan", label: "Pan" },
+  { key: "select", label: "Select" },
   { key: "pen", label: "Pen" },
   { key: "line", label: "Line" },
   { key: "rect", label: "Rect" },
@@ -576,6 +594,138 @@ const TOOLS: { key: OverlayTool; label: string }[] = [
   { key: "text", label: "Text" },
   { key: "eraser", label: "Erase" },
 ];
+
+/* ------------------------------------------------------------------ */
+/* select / move geometry (hit-test, translate, bounds)               */
+/* ------------------------------------------------------------------ */
+
+function distToSegment(
+  px: number,
+  py: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  if (dx === 0 && dy === 0) return Math.hypot(px - x1, py - y1);
+  let t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy);
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+function hitTestElement(
+  el: OverlayElement,
+  x: number,
+  y: number,
+  tol: number,
+): boolean {
+  switch (el.type) {
+    case "line":
+    case "arrow":
+      return distToSegment(x, y, el.x1, el.y1, el.x2, el.y2) <= tol + el.strokeWidth / 2;
+    case "rect": {
+      const minX = Math.min(el.x, el.x + el.width) - tol;
+      const maxX = Math.max(el.x, el.x + el.width) + tol;
+      const minY = Math.min(el.y, el.y + el.height) - tol;
+      const maxY = Math.max(el.y, el.y + el.height) + tol;
+      return x >= minX && x <= maxX && y >= minY && y <= maxY;
+    }
+    case "path": {
+      for (let i = 0; i + 3 < el.points.length; i += 2) {
+        if (
+          distToSegment(x, y, el.points[i], el.points[i + 1], el.points[i + 2], el.points[i + 3]) <=
+          tol + el.strokeWidth / 2
+        )
+          return true;
+      }
+      return el.points.length >= 2
+        ? Math.hypot(x - el.points[0], y - el.points[1]) <= tol + el.strokeWidth / 2
+        : false;
+    }
+    case "text":
+      return (
+        x >= el.x - tol &&
+        x <= el.x + el.text.length * el.fontSize * 0.6 + tol &&
+        y >= el.y - el.fontSize - tol &&
+        y <= el.y + tol
+      );
+  }
+}
+
+/** Topmost element under (x,y), or null. */
+function hitTest(
+  elements: OverlayElement[],
+  x: number,
+  y: number,
+  tol: number,
+): string | null {
+  for (let i = elements.length - 1; i >= 0; i--) {
+    if (hitTestElement(elements[i], x, y, tol)) return elements[i].id;
+  }
+  return null;
+}
+
+function moveElement(el: OverlayElement, dx: number, dy: number): OverlayElement {
+  switch (el.type) {
+    case "line":
+    case "arrow":
+      return { ...el, x1: el.x1 + dx, y1: el.y1 + dy, x2: el.x2 + dx, y2: el.y2 + dy };
+    case "rect":
+      return { ...el, x: el.x + dx, y: el.y + dy };
+    case "path":
+      return { ...el, points: el.points.map((v, i) => (i % 2 === 0 ? v + dx : v + dy)) };
+    case "text":
+      return { ...el, x: el.x + dx, y: el.y + dy };
+  }
+}
+
+function elementBounds(el: OverlayElement): {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+} {
+  switch (el.type) {
+    case "line":
+    case "arrow":
+      return {
+        x: Math.min(el.x1, el.x2),
+        y: Math.min(el.y1, el.y2),
+        w: Math.abs(el.x2 - el.x1),
+        h: Math.abs(el.y2 - el.y1),
+      };
+    case "rect":
+      return {
+        x: Math.min(el.x, el.x + el.width),
+        y: Math.min(el.y, el.y + el.height),
+        w: Math.abs(el.width),
+        h: Math.abs(el.height),
+      };
+    case "path": {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (let i = 0; i + 1 < el.points.length; i += 2) {
+        minX = Math.min(minX, el.points[i]);
+        maxX = Math.max(maxX, el.points[i]);
+        minY = Math.min(minY, el.points[i + 1]);
+        maxY = Math.max(maxY, el.points[i + 1]);
+      }
+      if (!isFinite(minX)) return { x: 0, y: 0, w: 0, h: 0 };
+      return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    }
+    case "text":
+      return {
+        x: el.x,
+        y: el.y - el.fontSize,
+        w: el.text.length * el.fontSize * 0.6,
+        h: el.fontSize * 1.3,
+      };
+  }
+}
 
 function BlueprintEditor({
   baseWidth,
@@ -621,6 +771,15 @@ function BlueprintEditor({
   // not just the scroll wheel.
   const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchDistRef = useRef<number | null>(null);
+
+  // select/move: which element is selected, and the in-progress drag.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const dragRef = useRef<{
+    id: string;
+    startX: number;
+    startY: number;
+    orig: OverlayElement;
+  } | null>(null);
 
   /** Zoom by `factor` keeping the container-local point (cx,cy) fixed. */
   const zoomAt = useCallback((factor: number, cx: number, cy: number) => {
@@ -725,6 +884,20 @@ function BlueprintEditor({
     e.currentTarget.setPointerCapture(e.pointerId);
     const { x, y } = toLocal(e.clientX, e.clientY);
 
+    if (tool === "select") {
+      const hit = hitTest(elements, x, y, 10 / zoom);
+      setSelectedId(hit);
+      if (hit) {
+        const orig = elements.find((el) => el.id === hit);
+        if (orig) {
+          drawingRef.current = true;
+          undoStackRef.current.push(elements); // one undo entry per move
+          dragRef.current = { id: hit, startX: x, startY: y, orig };
+        }
+      }
+      return;
+    }
+
     if (tool === "pan") {
       drawingRef.current = true;
       panStartRef.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
@@ -781,6 +954,17 @@ function BlueprintEditor({
 
     if (!drawingRef.current) return;
 
+    if (tool === "select" && dragRef.current) {
+      const d = dragRef.current;
+      const { x, y } = toLocal(e.clientX, e.clientY);
+      const dx = x - d.startX;
+      const dy = y - d.startY;
+      setElements((prev) =>
+        prev.map((el) => (el.id === d.id ? moveElement(d.orig, dx, dy) : el)),
+      );
+      return;
+    }
+
     if (tool === "pan" && panStartRef.current) {
       const s = panStartRef.current;
       setPan({ x: s.px + (e.clientX - s.x), y: s.py + (e.clientY - s.y) });
@@ -811,6 +995,7 @@ function BlueprintEditor({
 
     drawingRef.current = false;
     panStartRef.current = null;
+    dragRef.current = null;
 
     if (!draft) return;
 
@@ -850,11 +1035,13 @@ function BlueprintEditor({
   const cursor =
     tool === "pan"
       ? "grab"
-      : tool === "text"
-        ? "text"
-        : tool === "eraser"
-          ? "pointer"
-          : "crosshair";
+      : tool === "select"
+        ? "default"
+        : tool === "text"
+          ? "text"
+          : tool === "eraser"
+            ? "pointer"
+            : "crosshair";
 
   const toolBtn = (active: boolean) =>
     `px-2.5 py-1.5 rounded-md text-[11px] font-mono uppercase tracking-wider border transition ${
@@ -958,6 +1145,26 @@ function BlueprintEditor({
                 ))}
               </g>
             )}
+            {tool === "select" &&
+              selectedId &&
+              (() => {
+                const sel = elements.find((el) => el.id === selectedId);
+                if (!sel) return null;
+                const b = elementBounds(sel);
+                return (
+                  <rect
+                    x={b.x - 4}
+                    y={b.y - 4}
+                    width={b.w + 8}
+                    height={b.h + 8}
+                    fill="none"
+                    stroke="#4ecdc4"
+                    strokeWidth={1.5 / zoom}
+                    strokeDasharray={`${6 / zoom} ${4 / zoom}`}
+                    style={{ pointerEvents: "none" }}
+                  />
+                );
+              })()}
             {draft && <OverlayShape el={draft} />}
           </g>
         </svg>
@@ -1025,9 +1232,20 @@ function BlueprintEditor({
 function PlanViewport({
   base,
   overlay,
+  markMode = null,
+  onMark,
+  markers,
 }: {
   base: { width: number; height: number; content: React.ReactNode };
   overlay: BlueprintOverlay | null;
+  /** when set, a single-pointer drag marks a cut/viewpoint instead of panning */
+  markMode?: "cut" | "viewpoint" | null;
+  onMark?: (
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+  ) => void;
+  /** persisted markers to draw on top, in base-px space */
+  markers?: React.ReactNode;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
@@ -1049,6 +1267,23 @@ function PlanViewport({
   // True once the user zooms/pans by hand, so a later resize (orientation
   // change, window resize) won't yank the view back to fit underneath them.
   const userAdjustedRef = useRef(false);
+
+  // marking (cut / viewpoint): drag start in base-px + a live preview.
+  const markStartRef = useRef<{ x: number; y: number } | null>(null);
+  const [markPreview, setMarkPreview] = useState<{
+    a: { x: number; y: number };
+    b: { x: number; y: number };
+  } | null>(null);
+
+  /** container client coords → base-px (content space), via current pan/zoom. */
+  const toBasePx = (clientX: number, clientY: number) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    const { zoom: z, pan: p } = viewRef.current;
+    return {
+      x: (clientX - (rect?.left ?? 0) - p.x) / z,
+      y: (clientY - (rect?.top ?? 0) - p.y) / z,
+    };
+  };
 
   const fitToView = useCallback(() => {
     const el = containerRef.current;
@@ -1120,10 +1355,20 @@ function PlanViewport({
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     if (pointersRef.current.size === 1) {
-      panStartRef.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
       pinchDistRef.current = null;
+      if (markMode) {
+        const p = toBasePx(e.clientX, e.clientY);
+        markStartRef.current = p;
+        setMarkPreview({ a: p, b: p });
+        panStartRef.current = null; // marking takes the drag, not panning
+      } else {
+        panStartRef.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+      }
     } else if (pointersRef.current.size === 2) {
-      panStartRef.current = null; // two fingers down → pinch, not pan
+      // two fingers down → pinch; abandon any pan/marking
+      panStartRef.current = null;
+      markStartRef.current = null;
+      setMarkPreview(null);
       const [a, b] = [...pointersRef.current.values()];
       pinchDistRef.current = Math.hypot(a.x - b.x, a.y - b.y);
     }
@@ -1146,6 +1391,11 @@ function PlanViewport({
       return;
     }
 
+    if (markStartRef.current) {
+      setMarkPreview({ a: markStartRef.current, b: toBasePx(e.clientX, e.clientY) });
+      return;
+    }
+
     if (panStartRef.current) {
       userAdjustedRef.current = true;
       const s = panStartRef.current;
@@ -1157,6 +1407,16 @@ function PlanViewport({
     pointersRef.current.delete(e.pointerId);
 
     if (pointersRef.current.size < 2) pinchDistRef.current = null;
+
+    // finish a mark: report start→end (base-px) if it was a real drag
+    if (markStartRef.current && pointersRef.current.size === 0) {
+      const a = markStartRef.current;
+      const b = toBasePx(e.clientX, e.clientY);
+      markStartRef.current = null;
+      setMarkPreview(null);
+      if (onMark && Math.hypot(b.x - a.x, b.y - a.y) > 4) onMark(a, b);
+      return;
+    }
 
     if (pointersRef.current.size === 1) {
       // a finger lifted out of a pinch — re-anchor the pan to the survivor so
@@ -1187,10 +1447,28 @@ function PlanViewport({
       onPointerCancel={handlePointerUp}
       onPointerLeave={handlePointerUp}
     >
-      <svg className="w-full h-full select-none" style={{ cursor: "grab" }}>
+      <svg
+        className="w-full h-full select-none"
+        style={{ cursor: markMode ? "crosshair" : "grab" }}
+      >
         <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
           {base.content}
           <OverlayLayer elements={overlay?.elements ?? []} />
+          {markers}
+          {markPreview && (
+            <g style={{ pointerEvents: "none" }}>
+              <line
+                x1={markPreview.a.x}
+                y1={markPreview.a.y}
+                x2={markPreview.b.x}
+                y2={markPreview.b.y}
+                stroke="#fbbf24"
+                strokeWidth={2 / zoom}
+                strokeDasharray={`${6 / zoom} ${4 / zoom}`}
+              />
+              <circle cx={markPreview.a.x} cy={markPreview.a.y} r={4 / zoom} fill="#fbbf24" />
+            </g>
+          )}
         </g>
       </svg>
 
@@ -1221,6 +1499,299 @@ function PlanViewport({
 }
 
 /* ------------------------------------------------------------------ */
+/* generated elevation (facade) renderer                               */
+/*                                                                     */
+/* Draws an ElevationModel (derived from the floor plan by             */
+/* lib/elevation.ts) as a clean architectural elevation: wall block,   */
+/* storey lines, projected windows/doors, roof, ground line and        */
+/* overall dimensions — same dark style as the plan.                   */
+/* ------------------------------------------------------------------ */
+
+function renderElevation(el: ElevationModel): PlanBase {
+  const MARGIN = 56;
+  const ppf = clamp(900 / Math.max(el.width, el.totalHeight, 1), 8, 26);
+  const innerW = el.width * ppf;
+  const innerH = el.totalHeight * ppf;
+  const baseW = innerW + MARGIN * 2;
+  const baseH = innerH + MARGIN * 2;
+
+  const px = (fx: number) => MARGIN + fx * ppf;
+  const pz = (z: number) => MARGIN + (el.totalHeight - z) * ppf; // feet above grade → svg y
+  const ln = (f: number) => f * ppf;
+
+  const storeyTop = el.floors.reduce(
+    (s, f) => Math.max(s, f.baseZ + f.height),
+    0,
+  );
+
+  const nodes: React.ReactNode[] = [];
+
+  // faint horizontal grid (every 5 ft)
+  for (let z = 0; z <= el.totalHeight + 0.01; z += 5) {
+    nodes.push(
+      <line
+        key={`g-${z}`}
+        x1={px(0)}
+        y1={pz(z)}
+        x2={px(el.width)}
+        y2={pz(z)}
+        stroke="#ffffff"
+        strokeOpacity={0.04}
+        strokeWidth={1}
+      />,
+    );
+  }
+
+  // storey wall block
+  nodes.push(
+    <rect
+      key="wall"
+      x={px(0)}
+      y={pz(storeyTop)}
+      width={innerW}
+      height={ln(storeyTop)}
+      fill="rgba(78,205,196,0.05)"
+      stroke={WALL}
+      strokeWidth={4}
+    />,
+  );
+
+  // storey lines + level labels
+  el.floors.forEach((f) => {
+    if (f.baseZ > 0.01) {
+      nodes.push(
+        <line
+          key={`fl-${f.level}`}
+          x1={px(0)}
+          y1={pz(f.baseZ)}
+          x2={px(el.width)}
+          y2={pz(f.baseZ)}
+          stroke={PARTITION}
+          strokeWidth={1.5}
+          strokeOpacity={0.7}
+        />,
+      );
+    }
+    nodes.push(
+      <text
+        key={`lvl-${f.level}`}
+        x={px(0) + 6}
+        y={pz(f.baseZ) - 5}
+        fontSize={10}
+        fill="#52525b"
+        fontFamily="ui-monospace, monospace"
+      >
+        L{f.level}
+      </text>,
+    );
+  });
+
+  // projected openings
+  el.floors.forEach((f) => {
+    f.openings.forEach((o, i) => {
+      const x = px(o.center - o.width / 2);
+      const w = ln(o.width);
+      const yTop = pz(f.baseZ + o.sill + o.height);
+      const h = ln(o.height);
+      if (o.kind === "window") {
+        nodes.push(
+          <g key={`op-${f.level}-${i}`}>
+            <rect x={x} y={yTop} width={w} height={h} fill="rgba(78,205,196,0.10)" stroke={GLASS} strokeWidth={1.4} />
+            <line x1={x + w / 2} y1={yTop} x2={x + w / 2} y2={yTop + h} stroke={GLASS} strokeWidth={1} strokeOpacity={0.6} />
+            <line x1={x} y1={yTop + h / 2} x2={x + w} y2={yTop + h / 2} stroke={GLASS} strokeWidth={1} strokeOpacity={0.6} />
+          </g>,
+        );
+      } else {
+        nodes.push(
+          <g key={`op-${f.level}-${i}`}>
+            <rect x={x} y={yTop} width={w} height={h} fill="rgba(161,161,170,0.12)" stroke={DOOR_C} strokeWidth={1.6} />
+            <circle cx={x + w - Math.min(7, w * 0.2)} cy={yTop + h / 2} r={1.6} fill={DOOR_C} />
+          </g>,
+        );
+      }
+    });
+  });
+
+  // roof
+  if (el.roof.type === "gable") {
+    nodes.push(
+      <polygon
+        key="roof"
+        points={`${px(0)},${pz(storeyTop)} ${px(el.width / 2)},${pz(storeyTop + el.roof.height)} ${px(el.width)},${pz(storeyTop)}`}
+        fill="rgba(229,231,235,0.06)"
+        stroke={WALL}
+        strokeWidth={4}
+        strokeLinejoin="round"
+      />,
+    );
+  } else {
+    nodes.push(
+      <rect
+        key="roof"
+        x={px(-0.5)}
+        y={pz(storeyTop + el.roof.height)}
+        width={ln(el.width + 1)}
+        height={ln(el.roof.height)}
+        fill="rgba(229,231,235,0.08)"
+        stroke={WALL}
+        strokeWidth={3}
+      />,
+    );
+  }
+
+  // ground line + hatch
+  nodes.push(
+    <line key="ground" x1={px(-3)} y1={pz(0)} x2={px(el.width + 3)} y2={pz(0)} stroke={WALL} strokeWidth={3} />,
+  );
+  for (let gx = -2; gx <= el.width + 2; gx += 4) {
+    nodes.push(
+      <line key={`gh-${gx}`} x1={px(gx)} y1={pz(0)} x2={px(gx) - 6} y2={pz(0) + 7} stroke={DIM_C} strokeWidth={1} />,
+    );
+  }
+
+  // overall dimensions
+  const dimY = pz(0) + 26;
+  const dims = (
+    <g fontFamily="ui-monospace, monospace" fill={DIM_C} stroke={DIM_C}>
+      <line x1={px(0)} y1={dimY} x2={px(el.width)} y2={dimY} strokeWidth={1} />
+      <line x1={px(0)} y1={dimY - 4} x2={px(0)} y2={dimY + 4} strokeWidth={1} />
+      <line x1={px(el.width)} y1={dimY - 4} x2={px(el.width)} y2={dimY + 4} strokeWidth={1} />
+      <text x={px(el.width / 2)} y={dimY + 14} textAnchor="middle" fontSize={11} stroke="none">
+        {ftLabel(el.width)}
+      </text>
+      <line x1={px(0) - 26} y1={pz(0)} x2={px(0) - 26} y2={pz(el.totalHeight)} strokeWidth={1} />
+      <text
+        x={px(0) - 34}
+        y={pz(el.totalHeight / 2)}
+        textAnchor="middle"
+        fontSize={11}
+        stroke="none"
+        transform={`rotate(-90 ${px(0) - 34} ${pz(el.totalHeight / 2)})`}
+      >
+        {ftLabel(el.totalHeight)}
+      </text>
+    </g>
+  );
+
+  const content = (
+    <g style={{ pointerEvents: "none" }}>
+      <rect x={0} y={0} width={baseW} height={baseH} fill={PLAN_BG} />
+      <text
+        x={MARGIN}
+        y={26}
+        fontSize={11}
+        fill="#52525b"
+        fontFamily="ui-monospace, monospace"
+        letterSpacing={1}
+      >
+        {el.side.toUpperCase()} ELEVATION
+      </text>
+      {nodes}
+      {dims}
+    </g>
+  );
+
+  return { width: baseW, height: baseH, content };
+}
+
+/* ------------------------------------------------------------------ */
+/* generated section / cut renderer                                    */
+/*                                                                     */
+/* Draws a SectionModel (derived from the plan + a cut line by         */
+/* lib/section.ts): floor slabs, cut walls (poché) and the rooms the   */
+/* cut passes through as labelled bays, stacked by storey.             */
+/* ------------------------------------------------------------------ */
+
+function renderSection(sec: SectionModel): PlanBase {
+  const MARGIN = 56;
+  const ppf = clamp(900 / Math.max(sec.extent, sec.totalHeight, 1), 8, 26);
+  const innerW = sec.extent * ppf;
+  const innerH = sec.totalHeight * ppf;
+  const baseW = innerW + MARGIN * 2;
+  const baseH = innerH + MARGIN * 2;
+
+  const px = (fx: number) => MARGIN + fx * ppf;
+  const pz = (z: number) => MARGIN + (sec.totalHeight - z) * ppf;
+  const ln = (f: number) => f * ppf;
+
+  const storeyTop = sec.floors.reduce((s, f) => Math.max(s, f.baseZ + f.height), 0);
+  const SLAB = 0.9;
+
+  const nodes: React.ReactNode[] = [];
+
+  nodes.push(
+    <rect key="outline" x={px(0)} y={pz(storeyTop)} width={innerW} height={ln(storeyTop)} fill="none" stroke={WALL} strokeWidth={4} />,
+  );
+
+  sec.floors.forEach((f) => {
+    // floor slab (poché band)
+    nodes.push(
+      <rect key={`slab-${f.level}`} x={px(0)} y={pz(f.baseZ)} width={innerW} height={ln(SLAB)} fill="rgba(229,231,235,0.18)" stroke={WALL} strokeWidth={1} />,
+    );
+    const voidTop = pz(f.baseZ + f.height);
+    const voidH = ln(f.height - SLAB);
+    f.bays.forEach((b, i) => {
+      const x = px(b.start);
+      const w = ln(b.end - b.start);
+      nodes.push(
+        <rect key={`bay-${f.level}-${i}`} x={x} y={voidTop} width={w} height={voidH} fill="rgba(78,205,196,0.05)" />,
+      );
+      // cut walls at both sides of the bay
+      nodes.push(<rect key={`wl-${f.level}-${i}`} x={x - 2} y={voidTop} width={4} height={voidH} fill="rgba(229,231,235,0.65)" />);
+      nodes.push(<rect key={`wr-${f.level}-${i}`} x={px(b.end) - 2} y={voidTop} width={4} height={voidH} fill="rgba(229,231,235,0.65)" />);
+      if (w > 30 && voidH > 16) {
+        const label = b.name.length > 14 ? `${b.name.slice(0, 13)}…` : b.name;
+        nodes.push(
+          <text key={`lb-${f.level}-${i}`} x={x + w / 2} y={voidTop + voidH / 2} textAnchor="middle" fontSize={clamp(Math.min(w, voidH) * 0.16, 8, 12)} fill="#e4e4e7" fontFamily="ui-monospace, monospace">{label}</text>,
+        );
+      }
+    });
+    nodes.push(
+      <text key={`lvl-${f.level}`} x={px(0) + 6} y={pz(f.baseZ) - 5} fontSize={10} fill="#52525b" fontFamily="ui-monospace, monospace">L{f.level}</text>,
+    );
+  });
+
+  if (sec.roof.type === "gable") {
+    nodes.push(
+      <polygon key="roof" points={`${px(0)},${pz(storeyTop)} ${px(sec.extent / 2)},${pz(storeyTop + sec.roof.height)} ${px(sec.extent)},${pz(storeyTop)}`} fill="rgba(229,231,235,0.06)" stroke={WALL} strokeWidth={4} strokeLinejoin="round" />,
+    );
+  } else {
+    nodes.push(
+      <rect key="roof" x={px(0)} y={pz(storeyTop + sec.roof.height)} width={innerW} height={ln(sec.roof.height)} fill="rgba(229,231,235,0.18)" stroke={WALL} strokeWidth={2} />,
+    );
+  }
+
+  nodes.push(
+    <line key="ground" x1={px(-3)} y1={pz(0)} x2={px(sec.extent + 3)} y2={pz(0)} stroke={WALL} strokeWidth={3} />,
+  );
+
+  const dimY = pz(0) + 26;
+  const dims = (
+    <g fontFamily="ui-monospace, monospace" fill={DIM_C} stroke={DIM_C}>
+      <line x1={px(0)} y1={dimY} x2={px(sec.extent)} y2={dimY} strokeWidth={1} />
+      <line x1={px(0)} y1={dimY - 4} x2={px(0)} y2={dimY + 4} strokeWidth={1} />
+      <line x1={px(sec.extent)} y1={dimY - 4} x2={px(sec.extent)} y2={dimY + 4} strokeWidth={1} />
+      <text x={px(sec.extent / 2)} y={dimY + 14} textAnchor="middle" fontSize={11} stroke="none">{ftLabel(sec.extent)}</text>
+      <line x1={px(0) - 26} y1={pz(0)} x2={px(0) - 26} y2={pz(sec.totalHeight)} strokeWidth={1} />
+      <text x={px(0) - 34} y={pz(sec.totalHeight / 2)} textAnchor="middle" fontSize={11} stroke="none" transform={`rotate(-90 ${px(0) - 34} ${pz(sec.totalHeight / 2)})`}>{ftLabel(sec.totalHeight)}</text>
+    </g>
+  );
+
+  const content = (
+    <g style={{ pointerEvents: "none" }}>
+      <rect x={0} y={0} width={baseW} height={baseH} fill={PLAN_BG} />
+      <text x={MARGIN} y={26} fontSize={11} fill="#52525b" fontFamily="ui-monospace, monospace" letterSpacing={1}>
+        SECTION {sec.label}
+      </text>
+      {nodes}
+      {dims}
+    </g>
+  );
+
+  return { width: baseW, height: baseH, content };
+}
+
+/* ------------------------------------------------------------------ */
 /* public Plan View                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -1239,6 +1810,16 @@ export function PlanView({
 }) {
   const [editing, setEditing] = useState(false);
   const [selectedFloor, setSelectedFloor] = useState(0);
+  // "plan" = the floor plan; the four sides are derived elevations; "section"
+  // is a derived cut; "perspective" is gated (needs a 3D/image engine).
+  // Derived views are view-only here (the overlay editor is keyed to plan-space
+  // coordinates; per-drawing overlays come with the multi-drawing migration).
+  const [view, setView] = useState<
+    "plan" | ElevationSide | "section" | "perspective"
+  >("plan");
+  const [cut, setCut] = useState<SectionCut | null>(null);
+  // marking mode on the plan: drag to place a section cut or a viewpoint.
+  const [markMode, setMarkMode] = useState<"cut" | "viewpoint" | null>(null);
 
   const imgSize = useImageNaturalSize(imageUrl);
 
@@ -1255,6 +1836,11 @@ export function PlanView({
   }, [imageUrl, data]);
 
   const floorIndex = model ? clamp(selectedFloor, 0, model.floors.length - 1) : 0;
+
+  // Derived (not effect-synced): with no plan model there are no elevations/
+  // sections, so any non-plan selection falls back to "plan". The switcher is
+  // hidden without a model, so this never strands the user on a blank view.
+  const effectiveView = model ? view : "plan";
 
   const base = useMemo(() => {
     if (imageUrl && imgSize) {
@@ -1275,17 +1861,150 @@ export function PlanView({
         kind: "image" as const,
       };
     }
-    if (model && model.floors[floorIndex]) {
-      const r = renderFloorPlan(model.floors[floorIndex], model.buildingFootprint);
-      return {
-        width: r.width,
-        height: r.height,
-        content: r.content,
-        kind: "plan" as const,
-      };
+    if (model) {
+      if (
+        effectiveView === "front" ||
+        effectiveView === "back" ||
+        effectiveView === "left" ||
+        effectiveView === "right"
+      ) {
+        const r = renderElevation(deriveElevation(model, effectiveView));
+        return { width: r.width, height: r.height, content: r.content, kind: "elevation" as const };
+      }
+      if (effectiveView === "section") {
+        const c: SectionCut =
+          cut ?? { orientation: "h", pos: model.buildingFootprint.height / 2, label: "A-A" };
+        const r = renderSection(deriveSection(model, c));
+        return { width: r.width, height: r.height, content: r.content, kind: "section" as const };
+      }
+      // plan (also the backdrop for the gated perspective view)
+      if (model.floors[floorIndex]) {
+        const r = renderFloorPlan(model.floors[floorIndex], model.buildingFootprint);
+        return {
+          width: r.width,
+          height: r.height,
+          content: r.content,
+          kind: "plan" as const,
+          feet: r.feet,
+        };
+      }
     }
     return null;
-  }, [imageUrl, imgSize, model, floorIndex]);
+  }, [imageUrl, imgSize, model, floorIndex, effectiveView, cut]);
+
+  const isElevation = base?.kind === "elevation";
+  const isSection = base?.kind === "section";
+  const isPerspective = effectiveView === "perspective";
+  const isDerived = isElevation || isSection || isPerspective;
+
+  // Restore a saved cut when one is present on the overlay.
+  useEffect(() => {
+    const cl = overlay?.cutLines?.[0];
+    if (cl) setCut(planLineToCut(cl));
+  }, [overlay?.cutLines]);
+
+  const footW = model?.buildingFootprint.width ?? 0;
+  const footH = model?.buildingFootprint.height ?? 0;
+  const effectiveCut: SectionCut =
+    cut ?? { orientation: "h", pos: footH / 2, label: "A-A" };
+
+  /** Merge a patch into the overlay and persist (preserves the other parts). */
+  const persistOverlay = (patch: Partial<BlueprintOverlay>) => {
+    onSave({
+      version: 1,
+      width: overlay?.width ?? base?.width ?? 0,
+      height: overlay?.height ?? base?.height ?? 0,
+      elements: overlay?.elements ?? [],
+      cutLines: overlay?.cutLines,
+      viewpoints: overlay?.viewpoints,
+      ...patch,
+    });
+  };
+
+  // Saved cut lines + viewpoints drawn on the plan (base-px space).
+  const planMarkers = useMemo(() => {
+    if (view !== "plan" || base?.kind !== "plan" || !base.feet) return undefined;
+    const { ppf, margin } = base.feet;
+    const toPx = (fx: number, fy: number) => ({ x: margin + fx * ppf, y: margin + fy * ppf });
+    const nodes: React.ReactNode[] = [];
+    for (const c of overlay?.cutLines ?? []) {
+      const a = toPx(c.x1, c.y1);
+      const b = toPx(c.x2, c.y2);
+      nodes.push(
+        <g key={c.id}>
+          <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#fbbf24" strokeWidth={2} strokeDasharray="7 4" />
+          <circle cx={a.x} cy={a.y} r={3} fill="#fbbf24" />
+          <circle cx={b.x} cy={b.y} r={3} fill="#fbbf24" />
+          <text x={a.x + 4} y={a.y - 5} fontSize={11} fill="#fbbf24" fontFamily="ui-monospace, monospace">{c.label}</text>
+        </g>,
+      );
+    }
+    for (const v of overlay?.viewpoints ?? []) {
+      const p = toPx(v.x, v.y);
+      const len = 26;
+      const rad = (v.angleDeg * Math.PI) / 180;
+      const fov = ((v.fovDeg ?? 60) * Math.PI) / 180;
+      const tip = { x: p.x + Math.cos(rad) * len, y: p.y + Math.sin(rad) * len };
+      const l = { x: p.x + Math.cos(rad - fov / 2) * len, y: p.y + Math.sin(rad - fov / 2) * len };
+      const r = { x: p.x + Math.cos(rad + fov / 2) * len, y: p.y + Math.sin(rad + fov / 2) * len };
+      nodes.push(
+        <g key={v.id}>
+          <polygon points={`${p.x},${p.y} ${l.x},${l.y} ${r.x},${r.y}`} fill="rgba(78,205,196,0.15)" />
+          <line x1={p.x} y1={p.y} x2={tip.x} y2={tip.y} stroke="#4ecdc4" strokeWidth={2} />
+          <circle cx={p.x} cy={p.y} r={4} fill="#4ecdc4" />
+          <text x={p.x + 6} y={p.y - 6} fontSize={11} fill="#4ecdc4" fontFamily="ui-monospace, monospace">{v.label}</text>
+        </g>,
+      );
+    }
+    return nodes.length ? <g style={{ pointerEvents: "none" }}>{nodes}</g> : undefined;
+  }, [view, base, overlay?.cutLines, overlay?.viewpoints]);
+
+  /** A drag on the plan (base-px) → a saved cut line or viewpoint (plan feet). */
+  const handleMark = (
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+  ) => {
+    if (base?.kind !== "plan" || !base.feet || !model) return;
+    const { ppf, margin } = base.feet;
+    const toFeet = (p: { x: number; y: number }) => ({
+      x: (p.x - margin) / ppf,
+      y: (p.y - margin) / ppf,
+    });
+    const af = toFeet(a);
+    const bf = toFeet(b);
+    const level = floorIndex + 1;
+    if (markMode === "cut") {
+      const horiz = Math.abs(bf.x - af.x) >= Math.abs(bf.y - af.y);
+      const line: PlanCutLine = {
+        id: "cut-AA",
+        label: "A-A",
+        x1: af.x,
+        y1: af.y,
+        x2: bf.x,
+        y2: bf.y,
+        direction: horiz ? "down" : "right",
+        floorLevel: level,
+      };
+      persistOverlay({ cutLines: [line] });
+      setCut(planLineToCut(line));
+      setMarkMode(null);
+      setView("section");
+    } else if (markMode === "viewpoint") {
+      const angleDeg = (Math.atan2(bf.y - af.y, bf.x - af.x) * 180) / Math.PI;
+      const vp: PlanViewpoint = {
+        id: "vp-1",
+        label: "V1",
+        x: af.x,
+        y: af.y,
+        angleDeg,
+        fovDeg: 60,
+        kind: "exterior",
+        floorLevel: level,
+      };
+      persistOverlay({ viewpoints: [vp] });
+      setMarkMode(null);
+    }
+  };
 
   // Note: the editor is only reachable when `base` exists (guarded below), and
   // switching tabs / New Chat unmounts PlanView, so `editing` can't get stuck.
@@ -1334,6 +2053,9 @@ export function PlanView({
             width: base.width,
             height: base.height,
             elements,
+            // preserve marked cut lines / viewpoints across annotation saves
+            cutLines: overlay?.cutLines,
+            viewpoints: overlay?.viewpoints,
           });
           setEditing(false);
         }}
@@ -1342,14 +2064,50 @@ export function PlanView({
     );
   }
 
+  const viewBtn = (active: boolean) =>
+    `px-2.5 py-1 rounded text-[10px] font-mono uppercase tracking-wider border transition whitespace-nowrap ${
+      active
+        ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+        : "text-zinc-400 hover:text-zinc-200 border-zinc-800"
+    }`;
+
+  const title = isElevation
+    ? "Elevation"
+    : isSection
+      ? "Section"
+      : isPerspective
+        ? "Perspective"
+        : "Plan View";
+
   return (
     <div className="flex flex-col h-full min-h-0 gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2 flex-shrink-0">
         <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono">
-          Plan View
+          {title}
         </h2>
-        <div className="flex items-center gap-2">
-          {model && model.floors.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {/* view switcher — derived drawings of a generated plan */}
+          {model && (
+            <div className="flex items-center gap-1 overflow-x-auto hidden-scrollbar max-w-full">
+              <button onClick={() => setView("plan")} className={viewBtn(view === "plan")}>
+                Plan
+              </button>
+              {ELEVATION_SIDES.map((s) => (
+                <button key={s.key} onClick={() => setView(s.key)} className={viewBtn(view === s.key)}>
+                  {s.label}
+                </button>
+              ))}
+              <button onClick={() => setView("section")} className={viewBtn(view === "section")}>
+                Section
+              </button>
+              <button onClick={() => setView("perspective")} className={viewBtn(view === "perspective")}>
+                3D
+              </button>
+            </div>
+          )}
+
+          {/* floor switcher — plan view only */}
+          {model && view === "plan" && model.floors.length > 1 && (
             <div className="flex items-center gap-1">
               {model.floors.map((f, i) => (
                 <button
@@ -1366,29 +2124,142 @@ export function PlanView({
               ))}
             </div>
           )}
+
           <span className="text-[10px] uppercase font-mono text-zinc-500 border border-zinc-800 px-2 py-0.5 rounded">
-            {base.kind === "image" ? "Uploaded blueprint" : "Generated plan"}
+            {base.kind === "image"
+              ? "Uploaded"
+              : isElevation
+                ? `${view} elevation`
+                : isSection
+                  ? `section ${effectiveCut.label}`
+                  : isPerspective
+                    ? "perspective"
+                    : "Generated plan"}
           </span>
         </div>
       </div>
 
-      <PlanViewport base={base} overlay={overlay} />
+      {isPerspective ? (
+        <div className="relative flex-1 min-h-0 rounded-xl border border-zinc-800 bg-[#0a0d0f] flex flex-col items-center justify-center text-center gap-3 p-6">
+          <div
+            className="w-14 h-14 opacity-20"
+            style={{
+              backgroundImage:
+                "linear-gradient(rgba(78,205,196,1) 1px, transparent 1px), linear-gradient(90deg, rgba(78,205,196,1) 1px, transparent 1px)",
+              backgroundSize: "10px 10px",
+            }}
+          />
+          <p className="text-sm font-mono text-zinc-300">
+            Perspective rendering isn&apos;t available yet
+          </p>
+          <p className="text-xs text-zinc-500 max-w-sm leading-relaxed">
+            The local models generate geometry — plans, elevations and sections.
+            A photoreal or sketch perspective needs a 3D / image engine; the
+            viewpoint-marking tools turn on once that engine is connected.
+          </p>
+        </div>
+      ) : (
+        <PlanViewport
+          base={base}
+          overlay={isDerived ? null : overlay}
+          markMode={view === "plan" ? markMode : null}
+          onMark={view === "plan" ? handleMark : undefined}
+          markers={view === "plan" ? planMarkers : undefined}
+        />
+      )}
 
-      <div className="flex items-center justify-between gap-2 flex-shrink-0">
-        <span className="text-[10px] font-mono text-zinc-500">
-          {overlay?.elements?.length
-            ? `${overlay.elements.length} annotation${
-                overlay.elements.length === 1 ? "" : "s"
-              } saved`
-            : "No annotations yet"}
-        </span>
-        <button
-          onClick={() => setEditing(true)}
-          className="py-2 px-4 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-mono font-medium tracking-wide transition"
-        >
-          EDIT BLUEPRINT
-        </button>
-      </div>
+      {view === "plan" && model && (
+        <div className="flex flex-wrap items-center gap-2 flex-shrink-0 text-[10px] font-mono">
+          <span className="text-zinc-500 uppercase tracking-wider">Mark</span>
+          <button
+            onClick={() => setMarkMode(markMode === "cut" ? null : "cut")}
+            className={viewBtn(markMode === "cut")}
+          >
+            Cut line
+          </button>
+          <button
+            onClick={() => setMarkMode(markMode === "viewpoint" ? null : "viewpoint")}
+            className={viewBtn(markMode === "viewpoint")}
+          >
+            Viewpoint
+          </button>
+          {markMode && (
+            <span className="text-amber-300/80">
+              Drag on the plan to place the{" "}
+              {markMode === "cut" ? "section cut" : "viewpoint"}.
+            </span>
+          )}
+          {Boolean(
+            (overlay?.cutLines?.length ?? 0) +
+              (overlay?.viewpoints?.length ?? 0),
+          ) && (
+            <button
+              onClick={() => persistOverlay({ cutLines: [], viewpoints: [] })}
+              className="px-2.5 py-1 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-200 transition uppercase tracking-wider"
+            >
+              Clear marks
+            </button>
+          )}
+        </div>
+      )}
+
+      {isSection ? (
+        <div className="flex flex-wrap items-center gap-2 flex-shrink-0 text-[10px] font-mono">
+          <span className="text-zinc-500 uppercase tracking-wider">Cut {effectiveCut.label}</span>
+          <button
+            onClick={() => setCut({ ...effectiveCut, orientation: "h", pos: clamp(effectiveCut.pos, 0, footH) })}
+            className={viewBtn(effectiveCut.orientation === "h")}
+          >
+            Horizontal
+          </button>
+          <button
+            onClick={() => setCut({ ...effectiveCut, orientation: "v", pos: clamp(effectiveCut.pos, 0, footW) })}
+            className={viewBtn(effectiveCut.orientation === "v")}
+          >
+            Vertical
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={Math.round(effectiveCut.orientation === "h" ? footH : footW)}
+            step={1}
+            value={Math.round(effectiveCut.pos)}
+            onChange={(e) => setCut({ ...effectiveCut, pos: Number(e.target.value) })}
+            className="flex-1 min-w-[120px] accent-emerald-400"
+          />
+          <span className="text-zinc-500">{Math.round(effectiveCut.pos)}&apos;</span>
+          <button
+            onClick={() =>
+              model && persistOverlay({ cutLines: [cutToPlanLine(model, effectiveCut)] })
+            }
+            className="px-2.5 py-1 rounded border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10 transition uppercase tracking-wider"
+          >
+            Save cut
+          </button>
+        </div>
+      ) : isDerived ? (
+        <div className="flex items-center justify-between gap-2 flex-shrink-0">
+          <span className="text-[10px] font-mono text-zinc-500">
+            Derived from the floor plan · view only (pinch / scroll to zoom)
+          </span>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-2 flex-shrink-0">
+          <span className="text-[10px] font-mono text-zinc-500">
+            {overlay?.elements?.length
+              ? `${overlay.elements.length} annotation${
+                  overlay.elements.length === 1 ? "" : "s"
+                } saved`
+              : "No annotations yet"}
+          </span>
+          <button
+            onClick={() => setEditing(true)}
+            className="py-2 px-4 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-mono font-medium tracking-wide transition"
+          >
+            EDIT BLUEPRINT
+          </button>
+        </div>
+      )}
     </div>
   );
 }

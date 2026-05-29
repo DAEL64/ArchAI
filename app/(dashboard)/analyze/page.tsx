@@ -2,7 +2,11 @@
 
 import { useEffect, useRef, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import type { GenerationParams } from "@/types/drawing";
 import { useAnalysisSession } from "../analysis-session-provider";
+import { ConstraintsForm } from "../constraints-form";
+import { InteriorPanel } from "../interior-panel";
+import { LandscapePanel } from "../landscape-panel";
 import { PlanView } from "../plan-view";
 
 function AnalyzeContent() {
@@ -53,6 +57,13 @@ function AnalyzeContent() {
     "source",
   );
 
+  // Optional structured constraints for generation (req #9). Prefilled from a
+  // loaded project's saved params; never forced.
+  const [genParams, setGenParams] = useState<GenerationParams>({});
+  useEffect(() => {
+    if (data?.generationParams) setGenParams(data.generationParams);
+  }, [data?.generationParams]);
+
   const isBusy = state === "analyzing" || state === "generating";
 
   // When analysis/generation/loading finishes, surface the result pane on
@@ -92,12 +103,21 @@ function AnalyzeContent() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping]);
 
-  const tabs = ["rooms", "dimensions", "materials", "plan"] as const;
+  const tabs = [
+    "rooms",
+    "dimensions",
+    "materials",
+    "plan",
+    "interior",
+    "landscape",
+  ] as const;
   const tabLabels: Record<(typeof tabs)[number], string> = {
     rooms: "Rooms",
     dimensions: "Dimensions",
     materials: "Materials",
     plan: "Plan View",
+    interior: "Interior",
+    landscape: "Landscape",
   };
 
   return (
@@ -235,7 +255,7 @@ function AnalyzeContent() {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
                   if (generatePrompt.trim() && !isBusy) {
-                    generateBlueprint(generatePrompt);
+                    generateBlueprint(generatePrompt, genParams);
                   }
                 }
               }}
@@ -244,8 +264,14 @@ function AnalyzeContent() {
               className="w-full resize-none bg-zinc-950 border border-zinc-800 rounded-xl py-2.5 px-3 text-xs text-zinc-200 focus:outline-none focus:border-zinc-700 transition placeholder:text-zinc-600 hidden-scrollbar"
             />
 
+            <ConstraintsForm
+              value={genParams}
+              onChange={setGenParams}
+              disabled={isBusy}
+            />
+
             <button
-              onClick={() => generateBlueprint(generatePrompt)}
+              onClick={() => generateBlueprint(generatePrompt, genParams)}
               disabled={!generatePrompt.trim() || isBusy}
               className="w-full py-2.5 px-4 rounded-xl bg-emerald-500/90 hover:bg-emerald-400 disabled:bg-zinc-800 disabled:text-zinc-600 text-zinc-950 text-sm font-medium transition shadow-sm font-mono tracking-wide"
             >
@@ -328,6 +354,22 @@ function AnalyzeContent() {
                 isBusy={isBusy}
                 onSave={saveOverlay}
               />
+            </div>
+          ) : activeTab === "interior" ? (
+            data ? (
+              <InteriorPanel data={data} />
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 px-6 gap-2">
+                <p className="text-sm font-mono text-zinc-400">No blueprint yet</p>
+                <p className="text-xs text-zinc-500 max-w-xs">
+                  Generate or open a floor plan, then ask for interior design
+                  ideas for any room.
+                </p>
+              </div>
+            )
+          ) : activeTab === "landscape" ? (
+            <div className="flex-1 min-h-0">
+              <LandscapePanel projectId={currentProjectId} />
             </div>
           ) : data ? (
             <div className="space-y-6 max-w-3xl">
