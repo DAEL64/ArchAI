@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, Suspense } from "react";
+import { useEffect, useRef, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useAnalysisSession } from "../analysis-session-provider";
 import { PlanView } from "../plan-view";
@@ -45,7 +45,21 @@ function AnalyzeContent() {
   const inputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // On phones the three panes can't share the screen, so we show one at a time
+  // via a segmented control. On lg+ all three render side by side (this state
+  // is then irrelevant). Default to the controls pane so upload/generate are
+  // immediately reachable.
+  const [mobilePane, setMobilePane] = useState<"source" | "work" | "chat">(
+    "source",
+  );
+
   const isBusy = state === "analyzing" || state === "generating";
+
+  // When analysis/generation/loading finishes, surface the result pane on
+  // mobile so the user isn't left staring at the controls.
+  useEffect(() => {
+    if (state === "done") setMobilePane("work");
+  }, [state]);
 
   // "Start new" entry points (?new=1) clear the restored session, then we drop
   // the flag from the URL so a refresh doesn't keep wiping state.
@@ -88,28 +102,57 @@ function AnalyzeContent() {
 
   return (
     <div className="h-full flex flex-col bg-zinc-950 text-zinc-100 antialiased font-sans">
-      <header className="h-14 border-b border-zinc-800 px-6 flex items-center justify-between bg-zinc-900/50 backdrop-blur flex-shrink-0">
-        <div className="flex items-center gap-3">
-          <span className="font-mono text-xs tracking-wider uppercase text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded bg-emerald-500/5">
+      <header className="h-14 border-b border-zinc-800 px-4 sm:px-6 flex items-center justify-between gap-3 bg-zinc-900/50 backdrop-blur flex-shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="font-mono text-[10px] sm:text-xs tracking-wider uppercase text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded bg-emerald-500/5 flex-shrink-0">
             {state === "analyzing"
               ? "Analyzing"
               : state === "generating"
                 ? "Generating"
-                : "System Operational"}
+                : "Operational"}
           </span>
 
-          <h1 className="text-sm font-medium text-zinc-300">{fileName}</h1>
+          <h1 className="text-sm font-medium text-zinc-300 truncate">
+            {fileName}
+          </h1>
         </div>
 
         {currentProjectId && (
-          <span className="text-xs font-mono text-zinc-500">
+          <span className="hidden md:block text-xs font-mono text-zinc-500 flex-shrink-0">
             ID: {currentProjectId}
           </span>
         )}
       </header>
 
-      <div className="grid grid-cols-[320px_1fr_400px] flex-1 overflow-hidden">
-        <div className="border-r border-zinc-800 p-4 bg-zinc-900/20 flex flex-col gap-4 overflow-y-auto hidden-scrollbar">
+      {/* mobile pane switcher — hidden on lg where all three panes show */}
+      <div className="lg:hidden flex border-b border-zinc-800 bg-zinc-900/40 flex-shrink-0">
+        {(
+          [
+            ["source", "Source"],
+            ["work", "Workspace"],
+            ["chat", "Chat"],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setMobilePane(key)}
+            className={`flex-1 py-2.5 text-[11px] font-mono uppercase tracking-wider transition border-b-2 ${
+              mobilePane === key
+                ? "text-emerald-300 border-emerald-400 bg-emerald-500/5"
+                : "text-zinc-500 border-transparent hover:text-zinc-300"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col lg:grid lg:grid-cols-[300px_1fr_380px]">
+        <div
+          className={`${
+            mobilePane === "source" ? "flex" : "hidden"
+          } lg:flex flex-1 min-h-0 lg:flex-none border-r border-zinc-800 p-4 bg-zinc-900/20 flex-col gap-4 overflow-y-auto hidden-scrollbar`}
+        >
           <h3 className="text-xs font-semibold tracking-wider uppercase text-zinc-400">
             Blueprint Source
           </h3>
@@ -249,13 +292,17 @@ function AnalyzeContent() {
           )}
         </div>
 
-        <div className="p-6 overflow-y-auto flex flex-col bg-zinc-900/10 hidden-scrollbar">
-          <div className="flex gap-2 border-b border-zinc-800 pb-3 mb-6 flex-shrink-0">
+        <div
+          className={`${
+            mobilePane === "work" ? "flex" : "hidden"
+          } lg:flex flex-1 min-h-0 p-4 sm:p-6 overflow-y-auto flex-col bg-zinc-900/10 hidden-scrollbar`}
+        >
+          <div className="flex gap-2 border-b border-zinc-800 pb-3 mb-6 flex-shrink-0 overflow-x-auto hidden-scrollbar">
             {tabs.map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
-                className={`text-xs uppercase font-mono tracking-wider px-3 py-1.5 rounded-md transition ${
+                className={`text-xs uppercase font-mono tracking-wider px-3 py-1.5 rounded-md transition flex-shrink-0 whitespace-nowrap ${
                   activeTab === tab
                     ? "bg-zinc-800 text-zinc-100 border border-zinc-700"
                     : "text-zinc-400 hover:text-zinc-200 border border-transparent"
@@ -314,7 +361,7 @@ function AnalyzeContent() {
                   </h2>
 
                   {data.rooms && data.rooms.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {data.rooms.map((room, idx) => (
                         <div
                           key={idx}
@@ -509,7 +556,11 @@ function AnalyzeContent() {
           )}
         </div>
 
-        <div className="border-l border-zinc-800 flex flex-col bg-zinc-900/30 overflow-hidden">
+        <div
+          className={`${
+            mobilePane === "chat" ? "flex" : "hidden"
+          } lg:flex flex-1 min-h-0 border-l border-zinc-800 flex-col bg-zinc-900/30 overflow-hidden`}
+        >
           <div className="p-3 border-b border-zinc-800 bg-zinc-900/40 flex-shrink-0">
             <h3 className="text-xs font-semibold tracking-wider uppercase text-zinc-400 font-mono">
               Inference Telemetry Chat

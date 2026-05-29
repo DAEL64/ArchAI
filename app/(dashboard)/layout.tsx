@@ -100,6 +100,12 @@ export default function DashboardLayout({
   const pathname = usePathname();
   const router = useRouter();
   const [projects, setProjects] = useState<SavedProject[]>([]);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Close the mobile drawer whenever the route changes.
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [pathname]);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -131,7 +137,20 @@ export default function DashboardLayout({
 
   return (
     <div className="flex h-screen bg-[#0a0d0f] text-white overflow-hidden">
-      <aside className="w-[220px] flex-shrink-0 flex flex-col border-r border-white/5 bg-[#0c0f12]">
+      {/* mobile drawer backdrop */}
+      {drawerOpen && (
+        <div
+          onClick={() => setDrawerOpen(false)}
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+          aria-hidden
+        />
+      )}
+
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 w-[240px] flex-shrink-0 flex flex-col border-r border-white/5 bg-[#0c0f12] transition-transform duration-200 lg:static lg:z-auto lg:translate-x-0 ${
+          drawerOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
         <div className="flex items-center gap-3 px-5 py-5 border-b border-white/5">
           <div className="w-7 h-7 border border-[#4ecdc4]/60 rotate-45 flex items-center justify-center flex-shrink-0">
             <div className="w-2.5 h-2.5 bg-[#4ecdc4] rotate-[-45deg]" />
@@ -186,7 +205,10 @@ export default function DashboardLayout({
               <RecentProjectsList
                 projects={projects}
                 pathname={pathname}
-                onOpen={(id) => router.push(`/analyze?id=${id}`)}
+                onOpen={(id) => {
+                  setDrawerOpen(false);
+                  router.push(`/analyze?id=${id}`);
+                }}
               />
             </Suspense>
           )}
@@ -203,9 +225,28 @@ export default function DashboardLayout({
       </aside>
 
       <main className="flex-1 overflow-hidden flex flex-col">
-        <header className="flex items-center justify-between px-6 py-4 border-b border-white/5 bg-[#0a0d0f] flex-shrink-0">
-          <div>
-            <h1 className="text-sm font-mono text-white/60 tracking-wider capitalize">
+        <header className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-white/5 bg-[#0a0d0f] flex-shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Open menu"
+              className="lg:hidden flex-shrink-0 w-9 h-9 -ml-1 flex items-center justify-center rounded-md border border-white/10 text-white/60 hover:text-white/90 hover:border-white/20 transition"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+              >
+                <line x1="3" y1="6" x2="21" y2="6" />
+                <line x1="3" y1="12" x2="21" y2="12" />
+                <line x1="3" y1="18" x2="21" y2="18" />
+              </svg>
+            </button>
+            <h1 className="text-sm font-mono text-white/60 tracking-wider capitalize truncate">
               {pathname.replace("/", "") || "Dashboard"}
             </h1>
           </div>

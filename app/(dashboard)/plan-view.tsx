@@ -10,10 +10,13 @@ import {
 import type {
   BlueprintData,
   BlueprintOverlay,
-  BlueprintRoom,
+  FloorPlanModel,
   OverlayElement,
   OverlayTool,
+  PlanFloor,
+  RoomZone,
 } from "@/types/blueprint";
+import { floorPlanFromRooms } from "@/lib/floorplan";
 
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
@@ -91,119 +94,311 @@ function useImageNaturalSize(url: string | null) {
   return { w: measured.w, h: measured.h };
 }
 
-interface PlacedRoom {
-  name: string;
-  dim: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
+/* ------------------------------------------------------------------ */
+/* generated floor-plan renderer                                       */
+/*                                                                     */
+/* Draws the structured FloorPlanModel (lib/floorplan.ts) as a clean   */
+/* architectural plan: light walls on the dark ArchitectAI field, with */
+/* door swings, window glazing, room labels, overall dimensions and a  */
+/* faint construction grid. Geometry is in feet; we scale to pixels.   */
+/* ------------------------------------------------------------------ */
 
-interface FloorPlan {
+const ZONE_FILL: Record<RoomZone, string> = {
+  public: "rgba(78,205,196,0.08)",
+  private: "rgba(168,139,250,0.08)",
+  service: "rgba(251,191,36,0.07)",
+  circulation: "rgba(228,228,231,0.05)",
+};
+
+const PLAN_BG = "#0a0d0f";
+const WALL = "#e5e7eb";
+const PARTITION = "#9ca3af";
+const GLASS = "#4ecdc4";
+const DOOR_C = "#a1a1aa";
+const DIM_C = "#52525b";
+
+interface PlanBase {
   width: number;
   height: number;
-  rooms: PlacedRoom[];
+  content: React.ReactNode;
 }
 
-/**
- * Lays generated rooms out as a simple wrapped-row schematic. It is not a true
- * CAD plan — just a readable, proportional visual so a generated blueprint
- * (which has no source image) still has something to view and annotate.
- */
-function buildFloorPlan(rooms: BlueprintRoom[]): FloorPlan {
-  const PAD = 28;
-  const GAP = 16;
-  const MAX_W = 940;
-  const PPF = 7; // pixels per foot
+function ftLabel(feet: number): string {
+  const whole = Math.floor(feet);
+  const inches = Math.round((feet - whole) * 12);
+  return inches === 0 ? `${whole}'` : `${whole}'${inches}"`;
+}
 
-  const sized = rooms.map((r) => {
-    let w = r.widthFeet ? r.widthFeet * PPF : null;
-    let h = r.depthFeet ? r.depthFeet * PPF : null;
+function near(a: number, b: number) {
+  return Math.abs(a - b) < 0.1;
+}
 
-    if (!w || !h) {
-      const area = r.estimatedSqft && r.estimatedSqft > 0 ? r.estimatedSqft : 120;
-      const side = Math.sqrt(area) * PPF;
-      w = w ?? side;
-      h = h ?? side;
-    }
-
-    return {
-      name: r.name,
-      dim: r.dimensionText ?? (r.estimatedSqft ? `${r.estimatedSqft} sqft` : ""),
-      w: clamp(w, 80, 360),
-      h: clamp(h, 64, 300),
-    };
-  });
-
-  let x = PAD;
-  let y = PAD;
-  let rowHeight = 0;
-  let maxRight = PAD;
-
-  const placed: PlacedRoom[] = sized.map((b) => {
-    if (x + b.w > MAX_W - PAD && x > PAD) {
-      x = PAD;
-      y += rowHeight + GAP;
-      rowHeight = 0;
-    }
-    const p: PlacedRoom = { ...b, x, y };
-    x += b.w + GAP;
-    rowHeight = Math.max(rowHeight, b.h);
-    maxRight = Math.max(maxRight, p.x + b.w);
-    return p;
-  });
-
+/** quarter-circle door swing arc points + the open leaf endpoints */
+function doorSwing(
+  cx: number,
+  cy: number,
+  L: number,
+  dir: "h" | "v",
+  sign: number,
+) {
+  const r = L;
+  let hx: number;
+  let hy: number;
+  let open: number;
+  let closed: number;
+  if (dir === "v") {
+    hx = cx;
+    hy = cy - L / 2;
+    open = sign > 0 ? 0 : Math.PI;
+    closed = Math.PI / 2;
+  } else {
+    hx = cx - L / 2;
+    hy = cy;
+    open = sign > 0 ? Math.PI / 2 : -Math.PI / 2;
+    closed = 0;
+  }
+  const steps = 8;
+  const arc: string[] = [];
+  for (let i = 0; i <= steps; i++) {
+    const a = open + ((closed - open) * i) / steps;
+    arc.push(
+      `${(hx + r * Math.cos(a)).toFixed(1)},${(hy + r * Math.sin(a)).toFixed(1)}`,
+    );
+  }
   return {
-    width: Math.max(maxRight + PAD, 360),
-    height: y + rowHeight + PAD,
-    rooms: placed,
+    hx,
+    hy,
+    tipX: hx + r * Math.cos(open),
+    tipY: hy + r * Math.sin(open),
+    arc: arc.join(" "),
   };
 }
 
-function FloorPlanContent({ plan }: { plan: FloorPlan }) {
-  return (
-    <g style={{ pointerEvents: "none" }}>
-      <rect x={0} y={0} width={plan.width} height={plan.height} fill="#0a0d0f" />
-      {plan.rooms.map((r, i) => (
-        <g key={i}>
-          <rect
-            x={r.x}
-            y={r.y}
-            width={r.w}
-            height={r.h}
-            rx={4}
-            fill="rgba(78,205,196,0.06)"
-            stroke="#4ecdc4"
-            strokeOpacity={0.5}
-            strokeWidth={1.5}
-          />
+/** Renders one floor of a FloorPlanModel into a sized SVG group. */
+function renderFloorPlan(
+  floor: PlanFloor,
+  foot: { width: number; height: number },
+): PlanBase {
+  const MARGIN = 54;
+  const ppf = clamp(960 / Math.max(foot.width, foot.height, 1), 7, 18);
+  const innerW = foot.width * ppf;
+  const innerH = foot.height * ppf;
+  const baseW = innerW + MARGIN * 2;
+  const baseH = innerH + MARGIN * 2;
+
+  const px = (fx: number) => MARGIN + fx * ppf;
+  const py = (fy: number) => MARGIN + fy * ppf;
+  const ln = (f: number) => f * ppf;
+
+  /* faint construction grid (5 ft) */
+  const grid: React.ReactNode[] = [];
+  for (let gx = 0; gx <= foot.width + 0.001; gx += 5) {
+    grid.push(
+      <line
+        key={`gx-${gx}`}
+        x1={px(gx)}
+        y1={py(0)}
+        x2={px(gx)}
+        y2={py(foot.height)}
+        stroke="#ffffff"
+        strokeOpacity={0.04}
+        strokeWidth={1}
+      />,
+    );
+  }
+  for (let gy = 0; gy <= foot.height + 0.001; gy += 5) {
+    grid.push(
+      <line
+        key={`gy-${gy}`}
+        x1={px(0)}
+        y1={py(gy)}
+        x2={px(foot.width)}
+        y2={py(gy)}
+        stroke="#ffffff"
+        strokeOpacity={0.04}
+        strokeWidth={1}
+      />,
+    );
+  }
+
+  /* rooms: zone-tinted fill + partition stroke + labels */
+  const roomNodes = floor.rooms.map((r, i) => {
+    const x = px(r.x);
+    const y = py(r.y);
+    const w = ln(r.width);
+    const h = ln(r.height);
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const small = Math.min(w, h);
+    const font = clamp(small * 0.18, 8, 13);
+    const showName = w > 34 && h > 18;
+    const showDim = h > 46 && w > 52 && r.type !== "hallway";
+    const maxChars = Math.max(3, Math.floor(w / (font * 0.58)));
+    const label =
+      r.name.length > maxChars ? `${r.name.slice(0, maxChars - 1)}…` : r.name;
+
+    return (
+      <g key={`room-${i}`}>
+        <rect
+          x={x}
+          y={y}
+          width={w}
+          height={h}
+          fill={ZONE_FILL[r.zone]}
+          stroke={PARTITION}
+          strokeWidth={2}
+        />
+        {showName && (
           <text
-            x={r.x + r.w / 2}
-            y={r.y + r.h / 2 - 3}
+            x={cx}
+            y={showDim ? cy - 2 : cy + font * 0.35}
             textAnchor="middle"
-            fontSize={13}
+            fontSize={font}
             fill="#e4e4e7"
             fontFamily="ui-monospace, monospace"
           >
-            {r.name}
+            {label}
           </text>
-          {r.dim && (
-            <text
-              x={r.x + r.w / 2}
-              y={r.y + r.h / 2 + 14}
-              textAnchor="middle"
-              fontSize={10}
-              fill="#71717a"
-              fontFamily="ui-monospace, monospace"
-            >
-              {r.dim}
-            </text>
-          )}
+        )}
+        {showDim && (
+          <text
+            x={cx}
+            y={cy + font + 2}
+            textAnchor="middle"
+            fontSize={Math.max(8, font - 2)}
+            fill="#71717a"
+            fontFamily="ui-monospace, monospace"
+          >
+            {ftLabel(r.width)} × {ftLabel(r.height)}
+          </text>
+        )}
+      </g>
+    );
+  });
+
+  /* exterior shell (heavy wall) */
+  const shell = (
+    <rect
+      x={px(0)}
+      y={py(0)}
+      width={innerW}
+      height={innerH}
+      fill="none"
+      stroke={WALL}
+      strokeWidth={5}
+    />
+  );
+
+  /* windows: cut the wall, draw double-line glazing */
+  const windowNodes = floor.windows.map((win) => {
+    const cx = px(win.x);
+    const cy = py(win.y);
+    const L = ln(win.size);
+    if (win.dir === "v") {
+      return (
+        <g key={win.id}>
+          <rect x={cx - 3} y={cy - L / 2} width={6} height={L} fill={PLAN_BG} />
+          <line x1={cx - 1.3} y1={cy - L / 2} x2={cx - 1.3} y2={cy + L / 2} stroke={GLASS} strokeWidth={1.4} />
+          <line x1={cx + 1.3} y1={cy - L / 2} x2={cx + 1.3} y2={cy + L / 2} stroke={GLASS} strokeWidth={1.4} />
         </g>
-      ))}
+      );
+    }
+    return (
+      <g key={win.id}>
+        <rect x={cx - L / 2} y={cy - 3} width={L} height={6} fill={PLAN_BG} />
+        <line x1={cx - L / 2} y1={cy - 1.3} x2={cx + L / 2} y2={cy - 1.3} stroke={GLASS} strokeWidth={1.4} />
+        <line x1={cx - L / 2} y1={cy + 1.3} x2={cx + L / 2} y2={cy + 1.3} stroke={GLASS} strokeWidth={1.4} />
+      </g>
+    );
+  });
+
+  /* doors: cut the wall, draw swing arc + leaf */
+  const doorNodes = floor.doors.map((d) => {
+    const cx = px(d.x);
+    const cy = py(d.y);
+    const L = ln(d.size);
+    const sign =
+      d.dir === "v"
+        ? near(d.x, foot.width)
+          ? -1
+          : 1
+        : near(d.y, foot.height)
+          ? -1
+          : 1;
+
+    const color = d.kind === "entry" ? GLASS : DOOR_C;
+    const swing = doorSwing(cx, cy, L, d.dir, sign);
+    const cut =
+      d.dir === "v" ? (
+        <rect x={cx - 3.5} y={cy - L / 2} width={7} height={L} fill={PLAN_BG} />
+      ) : (
+        <rect x={cx - L / 2} y={cy - 3.5} width={L} height={7} fill={PLAN_BG} />
+      );
+
+    return (
+      <g key={d.id}>
+        {cut}
+        <polyline points={swing.arc} fill="none" stroke={color} strokeWidth={1} strokeOpacity={0.7} />
+        <line
+          x1={swing.hx}
+          y1={swing.hy}
+          x2={swing.tipX}
+          y2={swing.tipY}
+          stroke={color}
+          strokeWidth={d.kind === "entry" ? 2 : 1.5}
+        />
+      </g>
+    );
+  });
+
+  /* overall footprint dimension lines */
+  const dims = (
+    <g fontFamily="ui-monospace, monospace" fill={DIM_C} stroke={DIM_C}>
+      <line x1={px(0)} y1={py(foot.height) + 24} x2={px(foot.width)} y2={py(foot.height) + 24} strokeWidth={1} />
+      <line x1={px(0)} y1={py(foot.height) + 20} x2={px(0)} y2={py(foot.height) + 28} strokeWidth={1} />
+      <line x1={px(foot.width)} y1={py(foot.height) + 20} x2={px(foot.width)} y2={py(foot.height) + 28} strokeWidth={1} />
+      <text x={px(foot.width / 2)} y={py(foot.height) + 38} textAnchor="middle" fontSize={11} stroke="none">
+        {ftLabel(foot.width)}
+      </text>
+      <line x1={px(0) - 24} y1={py(0)} x2={px(0) - 24} y2={py(foot.height)} strokeWidth={1} />
+      <line x1={px(0) - 28} y1={py(0)} x2={px(0) - 20} y2={py(0)} strokeWidth={1} />
+      <line x1={px(0) - 28} y1={py(foot.height)} x2={px(0) - 20} y2={py(foot.height)} strokeWidth={1} />
+      <text
+        x={px(0) - 34}
+        y={py(foot.height / 2)}
+        textAnchor="middle"
+        fontSize={11}
+        stroke="none"
+        transform={`rotate(-90 ${px(0) - 34} ${py(foot.height / 2)})`}
+      >
+        {ftLabel(foot.height)}
+      </text>
     </g>
   );
+
+  const content = (
+    <g style={{ pointerEvents: "none" }}>
+      <rect x={0} y={0} width={baseW} height={baseH} fill={PLAN_BG} />
+      <text
+        x={MARGIN}
+        y={26}
+        fontSize={11}
+        fill="#52525b"
+        fontFamily="ui-monospace, monospace"
+        letterSpacing={1}
+      >
+        FLOOR {floor.level}
+      </text>
+      {grid}
+      {roomNodes}
+      {shell}
+      {windowNodes}
+      {doorNodes}
+      {dims}
+    </g>
+  );
+
+  return { width: baseW, height: baseH, content };
 }
 
 /* ------------------------------------------------------------------ */
@@ -421,6 +616,23 @@ function BlueprintEditor({
     viewRef.current = { zoom, pan };
   }, [zoom, pan]);
 
+  // Multi-touch tracking. A second finger switches the gesture to pinch-zoom
+  // (and discards any in-progress stroke) so the plan can be zoomed by touch,
+  // not just the scroll wheel.
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchDistRef = useRef<number | null>(null);
+
+  /** Zoom by `factor` keeping the container-local point (cx,cy) fixed. */
+  const zoomAt = useCallback((factor: number, cx: number, cy: number) => {
+    const { zoom: z, pan: p } = viewRef.current;
+    const nz = clamp(z * factor, 0.1, 10);
+    setPan({
+      x: cx - (cx - p.x) * (nz / z),
+      y: cy - (cy - p.y) * (nz / z),
+    });
+    setZoom(nz);
+  }, []);
+
   const fitToView = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -494,6 +706,19 @@ function BlueprintEditor({
   };
 
   const handlePointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    // Second finger down → pinch-zoom. Abandon any active stroke/pan.
+    if (pointersRef.current.size >= 2) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      drawingRef.current = false;
+      panStartRef.current = null;
+      setDraft(null);
+      const [a, b] = [...pointersRef.current.values()];
+      pinchDistRef.current = Math.hypot(a.x - b.x, a.y - b.y);
+      return;
+    }
+
     // Eraser is handled by per-element hit targets.
     if (tool === "eraser") return;
 
@@ -539,6 +764,21 @@ function BlueprintEditor({
   };
 
   const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    // Pinch-zoom: when two fingers are down, scale around their midpoint.
+    if (pointersRef.current.has(e.pointerId) && pointersRef.current.size >= 2) {
+      pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const pts = [...pointersRef.current.values()];
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      if (dist > 0 && pinchDistRef.current && pinchDistRef.current > 0) {
+        const rect = containerRef.current?.getBoundingClientRect();
+        const mx = (pts[0].x + pts[1].x) / 2 - (rect?.left ?? 0);
+        const my = (pts[0].y + pts[1].y) / 2 - (rect?.top ?? 0);
+        zoomAt(dist / pinchDistRef.current, mx, my);
+      }
+      pinchDistRef.current = dist;
+      return;
+    }
+
     if (!drawingRef.current) return;
 
     if (tool === "pan" && panStartRef.current) {
@@ -561,7 +801,14 @@ function BlueprintEditor({
     });
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e?: React.PointerEvent<SVGSVGElement>) => {
+    if (e) pointersRef.current.delete(e.pointerId);
+    if (pointersRef.current.size < 2) pinchDistRef.current = null;
+
+    // While ≥1 finger remains after a pinch, stay idle (don't resume drawing
+    // with the leftover finger) until it lifts too.
+    if (pointersRef.current.size >= 1) return;
+
     drawingRef.current = false;
     panStartRef.current = null;
 
@@ -688,6 +935,7 @@ function BlueprintEditor({
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
           onPointerLeave={handlePointerUp}
         >
           <g
@@ -766,6 +1014,213 @@ function BlueprintEditor({
 }
 
 /* ------------------------------------------------------------------ */
+/* read-only viewport                                                  */
+/*                                                                     */
+/* The non-editing plan/image view. Fits to the pane on load, then     */
+/* supports pinch-to-zoom and one-finger drag-pan on touch, scroll-    */
+/* wheel zoom on desktop, and +/−/FIT buttons everywhere — so a dense  */
+/* generated plan stays legible on a phone without breaking desktop.   */
+/* ------------------------------------------------------------------ */
+
+function PlanViewport({
+  base,
+  overlay,
+}: {
+  base: { width: number; height: number; content: React.ReactNode };
+  overlay: BlueprintOverlay | null;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+
+  // Live mirror so the once-attached wheel listener and pointer math read the
+  // current view without re-binding on every frame.
+  const viewRef = useRef({ zoom, pan });
+  useEffect(() => {
+    viewRef.current = { zoom, pan };
+  }, [zoom, pan]);
+
+  // Active pointers: 1 = drag-pan, 2 = pinch-zoom.
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchDistRef = useRef<number | null>(null);
+  const panStartRef = useRef<{ x: number; y: number; px: number; py: number } | null>(
+    null,
+  );
+  // True once the user zooms/pans by hand, so a later resize (orientation
+  // change, window resize) won't yank the view back to fit underneath them.
+  const userAdjustedRef = useRef(false);
+
+  const fitToView = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const scale =
+      Math.min(rect.width / base.width, rect.height / base.height) * 0.96 || 1;
+    setZoom(scale);
+    setPan({
+      x: (rect.width - base.width * scale) / 2,
+      y: (rect.height - base.height * scale) / 2,
+    });
+  }, [base.width, base.height]);
+
+  // Re-fit on mount and whenever the drawing changes (new plan / floor switch).
+  useEffect(() => {
+    fitToView();
+  }, [fitToView]);
+
+  // Auto-fit when the container first gets a real size (e.g. a mobile pane that
+  // mounted hidden and is now shown) or resizes — unless the user took control.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (!userAdjustedRef.current) fitToView();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fitToView]);
+
+  /** Zoom by `factor` keeping the container-local point (cx,cy) fixed. */
+  const zoomAround = useCallback((factor: number, cx: number, cy: number) => {
+    userAdjustedRef.current = true;
+    const { zoom: z, pan: p } = viewRef.current;
+    const nz = clamp(z * factor, 0.2, 12);
+    setPan({
+      x: cx - (cx - p.x) * (nz / z),
+      y: cy - (cy - p.y) * (nz / z),
+    });
+    setZoom(nz);
+  }, []);
+
+  const zoomFromButton = (factor: number) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    zoomAround(factor, rect ? rect.width / 2 : 0, rect ? rect.height / 2 : 0);
+  };
+
+  // Non-passive wheel listener so we can preventDefault (zoom, not page-scroll).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      zoomAround(
+        e.deltaY < 0 ? 1.1 : 0.9,
+        e.clientX - rect.left,
+        e.clientY - rect.top,
+      );
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [zoomAround]);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (pointersRef.current.size === 1) {
+      panStartRef.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+      pinchDistRef.current = null;
+    } else if (pointersRef.current.size === 2) {
+      panStartRef.current = null; // two fingers down → pinch, not pan
+      const [a, b] = [...pointersRef.current.values()];
+      pinchDistRef.current = Math.hypot(a.x - b.x, a.y - b.y);
+    }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(e.pointerId)) return;
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const pts = [...pointersRef.current.values()];
+
+    if (pts.length >= 2 && pinchDistRef.current != null) {
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      if (dist > 0 && pinchDistRef.current > 0) {
+        const rect = containerRef.current?.getBoundingClientRect();
+        const mx = (pts[0].x + pts[1].x) / 2 - (rect?.left ?? 0);
+        const my = (pts[0].y + pts[1].y) / 2 - (rect?.top ?? 0);
+        zoomAround(dist / pinchDistRef.current, mx, my);
+      }
+      pinchDistRef.current = dist;
+      return;
+    }
+
+    if (panStartRef.current) {
+      userAdjustedRef.current = true;
+      const s = panStartRef.current;
+      setPan({ x: s.px + (e.clientX - s.x), y: s.py + (e.clientY - s.y) });
+    }
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    pointersRef.current.delete(e.pointerId);
+
+    if (pointersRef.current.size < 2) pinchDistRef.current = null;
+
+    if (pointersRef.current.size === 1) {
+      // a finger lifted out of a pinch — re-anchor the pan to the survivor so
+      // the view doesn't jump.
+      const [p] = [...pointersRef.current.values()];
+      panStartRef.current = {
+        x: p.x,
+        y: p.y,
+        px: viewRef.current.pan.x,
+        py: viewRef.current.pan.y,
+      };
+    } else if (pointersRef.current.size === 0) {
+      panStartRef.current = null;
+    }
+  };
+
+  const zoomBtn =
+    "w-8 h-8 rounded-md bg-zinc-900/80 border border-zinc-700 text-zinc-200 text-lg leading-none hover:bg-zinc-800 backdrop-blur flex items-center justify-center";
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative flex-1 min-h-0 rounded-xl border border-zinc-800 bg-[#0a0d0f] overflow-hidden"
+      style={{ touchAction: "none" }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onPointerLeave={handlePointerUp}
+    >
+      <svg className="w-full h-full select-none" style={{ cursor: "grab" }}>
+        <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
+          {base.content}
+          <OverlayLayer elements={overlay?.elements ?? []} />
+        </g>
+      </svg>
+
+      <div className="absolute bottom-3 right-3 flex flex-col gap-1.5">
+        <button onClick={() => zoomFromButton(1.2)} className={zoomBtn} aria-label="Zoom in">
+          +
+        </button>
+        <button onClick={() => zoomFromButton(1 / 1.2)} className={zoomBtn} aria-label="Zoom out">
+          −
+        </button>
+        <button
+          onClick={() => {
+            userAdjustedRef.current = false;
+            fitToView();
+          }}
+          className="w-8 h-8 rounded-md bg-zinc-900/80 border border-zinc-700 text-zinc-400 text-[9px] font-mono hover:bg-zinc-800 backdrop-blur"
+          aria-label="Fit to view"
+        >
+          FIT
+        </button>
+      </div>
+
+      <div className="absolute top-3 left-3 text-[10px] font-mono text-zinc-500 bg-zinc-900/70 border border-zinc-800 rounded px-2 py-1 backdrop-blur pointer-events-none">
+        {Math.round(zoom * 100)}% · pinch / scroll to zoom
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* public Plan View                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -783,16 +1238,23 @@ export function PlanView({
   onSave: (overlay: BlueprintOverlay | null) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [selectedFloor, setSelectedFloor] = useState(0);
 
   const imgSize = useImageNaturalSize(imageUrl);
 
-  const floorPlan = useMemo(
-    () =>
-      !imageUrl && data?.rooms && data.rooms.length > 0
-        ? buildFloorPlan(data.rooms)
-        : null,
-    [imageUrl, data],
-  );
+  // The structured plan: stored with generated blueprints, or rebuilt on the
+  // fly from a flat room list (older projects / generated data with no stored
+  // floorPlan). Never built for uploaded images — those render the image.
+  const model = useMemo<FloorPlanModel | null>(() => {
+    if (imageUrl) return null;
+    if (data?.floorPlan?.floors?.length) return data.floorPlan;
+    if (data?.rooms && data.rooms.length > 0) {
+      return floorPlanFromRooms(data.rooms, data.dimensions, "", data.buildingType);
+    }
+    return null;
+  }, [imageUrl, data]);
+
+  const floorIndex = model ? clamp(selectedFloor, 0, model.floors.length - 1) : 0;
 
   const base = useMemo(() => {
     if (imageUrl && imgSize) {
@@ -813,16 +1275,17 @@ export function PlanView({
         kind: "image" as const,
       };
     }
-    if (floorPlan) {
+    if (model && model.floors[floorIndex]) {
+      const r = renderFloorPlan(model.floors[floorIndex], model.buildingFootprint);
       return {
-        width: floorPlan.width,
-        height: floorPlan.height,
-        content: <FloorPlanContent plan={floorPlan} />,
+        width: r.width,
+        height: r.height,
+        content: r.content,
         kind: "plan" as const,
       };
     }
     return null;
-  }, [imageUrl, imgSize, floorPlan]);
+  }, [imageUrl, imgSize, model, floorIndex]);
 
   // Note: the editor is only reachable when `base` exists (guarded below), and
   // switching tabs / New Chat unmounts PlanView, so `editing` can't get stuck.
@@ -881,25 +1344,35 @@ export function PlanView({
 
   return (
     <div className="flex flex-col h-full min-h-0 gap-4">
-      <div className="flex items-center justify-between flex-shrink-0">
+      <div className="flex flex-wrap items-center justify-between gap-2 flex-shrink-0">
         <h2 className="text-xs font-semibold tracking-wider uppercase text-zinc-500 font-mono">
           Plan View
         </h2>
-        <span className="text-[10px] uppercase font-mono text-zinc-500 border border-zinc-800 px-2 py-0.5 rounded">
-          {base.kind === "image" ? "Uploaded blueprint" : "Generated plan"}
-        </span>
+        <div className="flex items-center gap-2">
+          {model && model.floors.length > 1 && (
+            <div className="flex items-center gap-1">
+              {model.floors.map((f, i) => (
+                <button
+                  key={f.level}
+                  onClick={() => setSelectedFloor(i)}
+                  className={`px-2 py-1 rounded text-[10px] font-mono uppercase tracking-wider border transition ${
+                    i === floorIndex
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                      : "text-zinc-400 hover:text-zinc-200 border-zinc-800"
+                  }`}
+                >
+                  L{f.level}
+                </button>
+              ))}
+            </div>
+          )}
+          <span className="text-[10px] uppercase font-mono text-zinc-500 border border-zinc-800 px-2 py-0.5 rounded">
+            {base.kind === "image" ? "Uploaded blueprint" : "Generated plan"}
+          </span>
+        </div>
       </div>
 
-      <div className="relative flex-1 min-h-0 rounded-xl border border-zinc-800 bg-[#0a0d0f] overflow-hidden">
-        <svg
-          viewBox={`0 0 ${base.width} ${base.height}`}
-          preserveAspectRatio="xMidYMid meet"
-          className="w-full h-full"
-        >
-          {base.content}
-          <OverlayLayer elements={overlay?.elements ?? []} />
-        </svg>
-      </div>
+      <PlanViewport base={base} overlay={overlay} />
 
       <div className="flex items-center justify-between gap-2 flex-shrink-0">
         <span className="text-[10px] font-mono text-zinc-500">

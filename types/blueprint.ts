@@ -7,6 +7,8 @@ export interface BlueprintRoom {
   depthFeet?: number | null;
   estimatedSqft: number | null;
   floor: number;
+  /** semantic category, set when the room comes from the layout engine */
+  type?: RoomType;
 }
 
 export interface BlueprintDimensions {
@@ -26,6 +28,105 @@ export interface BlueprintData {
   mainPurpose: string;
   architecturalInsights: string[];
   confidence: ConfidenceLevel;
+  /**
+   * Spatial layout produced by the deterministic layout engine
+   * (lib/floorplan.ts) for AI-generated blueprints. Absent for blueprints
+   * analyzed from an uploaded image (those render the source image instead).
+   * Stored with the project — it is small vector JSON, never a flattened image.
+   */
+  floorPlan?: FloorPlanModel | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Structured floor-plan layout model                                  */
+/*                                                                     */
+/* All geometry is expressed in FEET (architectural units). The Plan   */
+/* View renderer scales feet → pixels for display. Keeping the model   */
+/* in real units means a generated plan reads at true proportion and   */
+/* survives re-rendering at any zoom / screen size.                    */
+/* ------------------------------------------------------------------ */
+
+export type RoomType =
+  | "living"
+  | "dining"
+  | "kitchen"
+  | "entry"
+  | "family"
+  | "bedroom"
+  | "master"
+  | "bathroom"
+  | "closet"
+  | "office"
+  | "hallway"
+  | "stair"
+  | "lift"
+  | "garage"
+  | "utility"
+  | "laundry"
+  | "storage"
+  | "balcony"
+  | "other";
+
+/** public = living/dining/kitchen/entry · private = bed/bath/closet/office ·
+ *  service = utility/storage/garage/stair/lift · circulation = hallways. */
+export type RoomZone = "public" | "private" | "service" | "circulation";
+
+export interface PlanRoom {
+  name: string;
+  type: RoomType;
+  zone: RoomZone;
+  /** bottom-left-origin rectangle, in feet */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** names of rooms this one shares a doorway with */
+  adjacentTo: string[];
+}
+
+export interface PlanDoor {
+  id: string;
+  /** centre of the opening, in feet */
+  x: number;
+  y: number;
+  /** opening width, in feet */
+  size: number;
+  /** orientation of the wall the door sits in: "h" = horizontal wall
+   *  (opening runs along x), "v" = vertical wall (opening runs along y) */
+  dir: "h" | "v";
+  kind: "interior" | "entry";
+}
+
+export interface PlanWindow {
+  id: string;
+  x: number;
+  y: number;
+  size: number;
+  dir: "h" | "v";
+}
+
+export interface PlanWall {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  exterior: boolean;
+}
+
+export interface PlanFloor {
+  level: number;
+  rooms: PlanRoom[];
+  doors: PlanDoor[];
+  windows: PlanWindow[];
+  walls: PlanWall[];
+  annotations: string[];
+}
+
+export interface FloorPlanModel {
+  version: 1;
+  units: "feet";
+  buildingFootprint: { width: number; height: number };
+  floors: PlanFloor[];
 }
 
 export interface ChatMessage {
