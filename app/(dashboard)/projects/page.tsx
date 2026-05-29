@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import Link from "next/link";
 import type { SavedProject } from "@/types/blueprint";
+import { projectsApi } from "@/lib/api/projects";
 
 function ProjectCard({
   project,
@@ -154,15 +155,7 @@ export default function ProjectsPage() {
     try {
       setError(null);
 
-      const res = await fetch("/api/projects", {
-        cache: "no-store",
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to load projects");
-      }
-
-      const data = (await res.json()) as SavedProject[];
+      const data = await projectsApi.list();
       setProjects(data);
     } catch (err) {
       console.error("Failed to load projects:", err);
@@ -185,13 +178,7 @@ export default function ProjectsPage() {
 
   async function handleDelete(id: string) {
     try {
-      const res = await fetch(`/api/projects?id=${id}`, {
-        method: "DELETE",
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to delete project");
-      }
+      await projectsApi.remove(id);
 
       setProjects((prev) => prev.filter((project) => project.id !== id));
       window.dispatchEvent(new Event("architectai-projects-updated"));

@@ -16,12 +16,45 @@ model Project {
   id              String    @id @default(auto()) @map("_id") @db.ObjectId
   clientSessionId String?
   name            String    @default("New Blueprint")
+  // ---- legacy single-blueprint fields (kept for back-compat) ----
+  // Pre-existing projects store their one blueprint here. The service layer
+  // (lib/services/drawingService) lazily presents these as a floor_plan
+  // Drawing so old and new projects look identical to the UI. New work writes
+  // Drawing records instead. Do NOT remove until legacy projects are migrated.
   imageUrl        String?
   data            Json?
   overlay         Json?
+  // ---- new multi-drawing model ----
+  drawings        Drawing[]
   messages        Message[]
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+}
+
+// A single architectural drawing within a project. A project can hold many:
+// a floor plan, its elevations, sections, sketches, interior/landscape studies.
+// Everything is structured JSON + at most ONE original image (disk-conscious):
+// edits live in overlayData as vector JSON, never as re-flattened image copies.
+model Drawing {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  projectId        String   @db.ObjectId
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // floor_plan | facade | section | sketch | interior | landscape
+  type             String
+  // uploaded | generated | edited
+  source           String   @default("generated")
+  name             String?
+  imageUrl         String?  // single original raster (uploaded studies); null for generated vector drawings
+  structuredData   Json?    // type-specific geometry (FloorPlanModel, ElevationModel, …)
+  overlayData      Json?    // BlueprintOverlay — user edits, vector only
+  generationParams Json?    // the structured fields + freeform prompt used to make it
+  analysisData     Json?    // BlueprintData / AI analysis results
+  cutLines         Json?    // PlanCutLine[] — section cut markers (floor plans)
+  viewpoints       Json?    // PlanViewpoint[] — perspective markers (floor plans)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([projectId])
 }
 
 model Message {

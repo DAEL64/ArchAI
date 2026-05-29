@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import type { SavedProject } from "@/types/blueprint";
+import { projectsApi } from "@/lib/api/projects";
 import { AnalysisSessionProvider } from "./analysis-session-provider";
 
 /**
@@ -109,15 +110,7 @@ export default function DashboardLayout({
 
   const loadProjects = useCallback(async () => {
     try {
-      const res = await fetch("/api/projects", {
-        cache: "no-store",
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to load recent projects");
-      }
-
-      const data = (await res.json()) as SavedProject[];
+      const data = await projectsApi.list();
       setProjects(data.slice(0, 5));
     } catch (err) {
       console.error("Failed to load projects inside layout:", err);

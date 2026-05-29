@@ -14,6 +14,9 @@ import type {
   ChatMessage,
   SavedProject,
 } from "@/types/blueprint";
+import { projectsApi } from "@/lib/api/projects";
+import { aiApi } from "@/lib/api/ai";
+import { ApiError } from "@/lib/api/http";
 
 export type AnalysisState = "idle" | "analyzing" | "generating" | "done" | "error";
 export type ActiveTab = "rooms" | "dimensions" | "materials" | "plan";
@@ -144,24 +147,14 @@ export function AnalysisSessionProvider({
 
   const createProject = useCallback(
     async (payload: ProjectPayload): Promise<SavedProject> => {
-      const res = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          clientSessionId: clientSessionIdRef.current,
-          name: payload.name || "New Blueprint Analysis",
-          imageUrl: payload.imageUrl ?? null,
-          data: payload.data ?? null,
-          overlay: payload.overlay ?? null,
-          messages: payload.messages ?? [],
-        }),
+      const project = await projectsApi.create({
+        clientSessionId: clientSessionIdRef.current ?? "",
+        name: payload.name || "New Blueprint Analysis",
+        imageUrl: payload.imageUrl ?? null,
+        data: payload.data ?? null,
+        overlay: payload.overlay ?? null,
+        messages: payload.messages ?? [],
       });
-
-      if (!res.ok) {
-        throw new Error("Failed to create project");
-      }
-
-      const project = (await res.json()) as SavedProject;
 
       commitProjectId(project.id);
       notifyProjectRefresh();
@@ -173,17 +166,7 @@ export function AnalysisSessionProvider({
 
   const updateProject = useCallback(
     async (projectId: string, payload: ProjectPayload): Promise<SavedProject> => {
-      const res = await fetch("/api/projects", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, ...payload }),
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to update project");
-      }
-
-      const project = (await res.json()) as SavedProject;
+      const project = await projectsApi.update(projectId, payload);
 
       rememberActiveProject(project.id);
       notifyProjectRefresh();
@@ -225,15 +208,7 @@ export function AnalysisSessionProvider({
       try {
         setIsProjectLoading(true);
 
-        const res = await fetch(`/api/projects?id=${id}`, {
-          cache: "no-store",
-        });
-
-        if (!res.ok) {
-          return false;
-        }
-
-        const project = (await res.json()) as SavedProject;
+        const project = await projectsApi.get(id);
 
         commitProjectId(project.id);
         setData(project.data);
@@ -247,7 +222,11 @@ export function AnalysisSessionProvider({
 
         return true;
       } catch (err) {
-        console.error("Failed to hydrate project:", err);
+        // A deleted/deep-linked-missing project is an expected 404, not an
+        // error worth logging.
+        if (!(err instanceof ApiError) || err.status !== 404) {
+          console.error("Failed to hydrate project:", err);
+        }
         return false;
       } finally {
         setIsProjectLoading(false);
@@ -333,34 +312,7 @@ export function AnalysisSessionProvider({
       setAnalysisError(null);
 
       try {
-        const res = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ imageBase64: imageB64 }),
-        });
-
-        if (!res.ok) {
-          let errorMessage = "Analysis failed server-side";
-
-          try {
-            const errorBody = await res.json();
-            errorMessage =
-              errorBody?.details ||
-              errorBody?.error ||
-              errorBody?.message ||
-              JSON.stringify(errorBody);
-          } catch {
-            try {
-              errorMessage = await res.text();
-            } catch {
-              errorMessage = "Analysis failed server-side";
-            }
-          }
-
-          throw new Error(errorMessage);
-        }
-
-        const parsedData = (await res.json()) as BlueprintData;
+        const parsedData = await aiApi.analyze(imageB64);
 
         setData(parsedData);
         setState("done");
@@ -413,25 +365,7 @@ export function AnalysisSessionProvider({
         setFileName(generatedName);
 
         try {
-          const res = await fetch("/api/generate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: cleanPrompt }),
-          });
-
-          if (!res.ok) {
-            let errorMessage = "Blueprint generation failed";
-            try {
-              const errorBody = await res.json();
-              errorMessage =
-                errorBody?.details || errorBody?.error || errorMessage;
-            } catch {
-              /* keep default */
-            }
-            throw new Error(errorMessage);
-          }
-
-          const parsedData = (await res.json()) as BlueprintData;
+          const parsedData = await aiApi.generate(cleanPrompt);
 
           result = parsedData;
 
@@ -547,20 +481,7 @@ export function AnalysisSessionProvider({
               note: "No completed blueprint analysis is available yet. Answer generally. You can also offer to generate a blueprint if the user describes a building they want.",
             });
 
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: payloadMessages,
-          blueprintContext: context,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error("Model failed to compute response");
-      }
-
-      const { reply } = (await res.json()) as { reply?: string };
+      const { reply } = await aiApi.chat(payloadMessages, context);
 
       const finalMessages: ChatMessage[] = [
         ...payloadMessages,
